@@ -42,19 +42,23 @@ function deleteSessionKeySecure() {
 }
 
 // Migrate legacy sessionKey from electron-store to safeStorage on first run.
-// Only delete the legacy key after a durable secure write is confirmed.
+// The legacy key is ALWAYS deleted from disk — never leave weakly-encrypted
+// secrets around. If safeStorage is unavailable, the user must re-login.
 function migrateCredentials() {
   const legacyKey = store.get('sessionKey');
-  if (legacyKey) {
-    if (safeStorage.isEncryptionAvailable()) {
-      setSessionKeySecure(legacyKey);
-      store.delete('sessionKey'); // Remove from insecure storage
-      debugLog('Migrated sessionKey to safeStorage');
-    } else {
-      // safeStorage unavailable — keep legacy key and use in-memory fallback
-      inMemorySessionKey = legacyKey;
-      debugLog('safeStorage unavailable — using legacy key in memory only');
-    }
+  if (!legacyKey) return;
+
+  if (safeStorage.isEncryptionAvailable()) {
+    // Write secure copy FIRST, then delete legacy — avoids data loss on crash
+    setSessionKeySecure(legacyKey);
+    store.delete('sessionKey');
+    debugLog('Migrated sessionKey to safeStorage');
+  } else {
+    // safeStorage unavailable — load into memory for this session,
+    // then delete from disk. User will need to re-login on next restart.
+    inMemorySessionKey = legacyKey;
+    store.delete('sessionKey');
+    debugLog('safeStorage unavailable — session key is memory-only (will not persist)');
   }
 }
 
