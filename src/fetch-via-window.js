@@ -11,6 +11,13 @@
  * Cloudflare's bot detection. This is the simplest reliable approach
  * after the previous cookie-database-reading strategy proved too
  * fragile and OS-specific.
+ *
+ * Security:
+ * - Only allows requests to https://claude.ai/api/
+ * - Uses an isolated session partition (passed by caller)
+ * - Verifies final URL before extracting content
+ * - Navigation guards prevent redirects to untrusted origins
+ * - Sandbox enabled for defense-in-depth
  */
 const { BrowserWindow } = require('electron');
 
@@ -25,22 +32,34 @@ const BLOCKED_SIGNATURES = [
   { pattern: '<html', error: 'UnexpectedHTML' },
 ];
 
-function fetchViaWindow(url, { timeoutMs = 30000 } = {}) {
+function fetchViaWindow(url, { timeoutMs = 30000, partition = null } = {}) {
   // Only allow requests to the Claude.ai API to prevent session cookie leakage
   if (!url.startsWith('https://claude.ai/api/')) {
     return Promise.reject(new Error(`Blocked: URL must start with https://claude.ai/api/, got: ${url}`));
   }
 
   return new Promise((resolve, reject) => {
+    const webPrefs = {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true
+    };
+    if (partition) webPrefs.partition = partition;
+
     const win = new BrowserWindow({
       width: 800,
       height: 600,
       show: false,
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true
+      webPreferences: webPrefs
+    });
+
+    // Navigation guards — prevent redirects away from Claude.ai
+    win.webContents.on('will-navigate', (event, navUrl) => {
+      if (!navUrl.startsWith('https://claude.ai/')) {
+        event.preventDefault();
       }
     });
+    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
     const timeout = setTimeout(() => {
       win.close();
@@ -49,6 +68,15 @@ function fetchViaWindow(url, { timeoutMs = 30000 } = {}) {
 
     win.webContents.on('did-finish-load', async () => {
       try {
+        // Verify final URL is still on claude.ai before extracting content
+        const finalUrl = win.webContents.getURL();
+        if (!finalUrl.startsWith('https://claude.ai/')) {
+          clearTimeout(timeout);
+          win.close();
+          reject(new Error(`UnexpectedRedirect: navigated to ${finalUrl}`));
+          return;
+        }
+
         const bodyText = await win.webContents.executeJavaScript(
           'document.body.innerText || document.body.textContent'
         );

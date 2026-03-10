@@ -123,7 +123,7 @@ const elements = {
 // Initialize
 async function init() {
     setupEventListeners();
-    credentials = await window.electronAPI.getCredentials();
+    credentials = await window.electronAPI.getAuthState();
 
     // Apply saved theme, accent, and load thresholds immediately
     const settings = await window.electronAPI.getSettings();
@@ -150,7 +150,7 @@ async function init() {
         UPDATE_INTERVAL = settings.refreshInterval * 60 * 1000;
     }
 
-    if (credentials.sessionKey && credentials.organizationId) {
+    if (credentials.hasSession && credentials.organizationId) {
         if (settings.compact) {
             isCompact = true;
             document.body.classList.add('compact');
@@ -262,7 +262,7 @@ function setupEventListeners() {
 
     elements.logoutBtn.addEventListener('click', async () => {
         await window.electronAPI.deleteCredentials();
-        credentials = { sessionKey: null, organizationId: null };
+        credentials = { hasSession: false, organizationId: null };
         elements.settingsOverlay.style.display = 'none';
         elements.widgetContainer.classList.remove('settings-active');
         showLoginRequired();
@@ -285,7 +285,7 @@ function setupEventListeners() {
     // Listen for session expiration events (403 errors)
     window.electronAPI.onSessionExpired(() => {
         debugLog('Session expired event received');
-        credentials = { sessionKey: null, organizationId: null };
+        credentials = { hasSession: false, organizationId: null };
         showLoginRequired();
     });
 
@@ -549,10 +549,9 @@ async function handleConnect() {
     elements.sessionKeyError.textContent = '';
 
     try {
-        const result = await window.electronAPI.validateSessionKey(sessionKey);
+        const result = await window.electronAPI.validateAndSaveSessionKey(sessionKey);
         if (result.success) {
-            credentials = { sessionKey, organizationId: result.organizationId };
-            await window.electronAPI.saveCredentials(credentials);
+            credentials = { hasSession: true, organizationId: result.organizationId };
             elements.sessionKeyInput.value = '';
             showMainContent();
             await fetchUsageData();
@@ -581,16 +580,15 @@ async function handleAutoDetect() {
             return;
         }
 
-        // Got sessionKey from login, now validate it
+        // Session key captured and stored by main process — now validate it
         elements.autoDetectBtn.textContent = 'Validating...';
-        const validation = await window.electronAPI.validateSessionKey(result.sessionKey);
+        const validation = await window.electronAPI.validateStoredSession();
 
         if (validation.success) {
             credentials = {
-                sessionKey: result.sessionKey,
+                hasSession: true,
                 organizationId: validation.organizationId
             };
-            await window.electronAPI.saveCredentials(credentials);
             showMainContent();
             await fetchUsageData();
             startAutoUpdate();
@@ -610,7 +608,7 @@ async function handleAutoDetect() {
 async function fetchUsageData() {
     debugLog('fetchUsageData called');
 
-    if (!credentials.sessionKey || !credentials.organizationId) {
+    if (!credentials.hasSession || !credentials.organizationId) {
         debugLog('Missing credentials, showing login');
         showLoginRequired();
         return;
@@ -641,7 +639,7 @@ async function fetchUsageData() {
     } catch (error) {
         console.error('Error fetching usage data:', error);
         if (error.message.includes('SessionExpired') || error.message.includes('Unauthorized')) {
-            credentials = { sessionKey: null, organizationId: null };
+            credentials = { hasSession: false, organizationId: null };
             setStatus('error', 'Session expired');
             showLoginRequired();
         } else {
@@ -676,80 +674,104 @@ const EXTRA_ROW_CONFIG = {
     extra_usage: { label: 'Extra Usage', color: 'extra' },
 };
 
+// Safe DOM construction helper — avoids innerHTML with API-derived data.
+function createEl(tag, className, textContent) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    if (textContent !== undefined) el.textContent = textContent;
+    return el;
+}
+
 function buildExtraRows(data) {
-    elements.extraRows.innerHTML = '';
+    // Clear existing rows safely
+    while (elements.extraRows.firstChild) {
+        elements.extraRows.removeChild(elements.extraRows.firstChild);
+    }
     let count = 0;
 
     for (const [key, config] of Object.entries(EXTRA_ROW_CONFIG)) {
         const value = data[key];
-        // extra_usage is valid with utilization OR balance_cents (prepaid only)
         const hasUtilization = value && value.utilization !== undefined;
         const hasBalance = key === 'extra_usage' && value && value.balance_cents != null;
         if (!hasUtilization && !hasBalance) continue;
 
-        const utilization = value.utilization || 0;
+        // Coerce values to safe numbers
+        const utilization = Number.isFinite(+value.utilization) ? Math.max(0, Math.min(100, +value.utilization)) : 0;
         const resetsAt = value.resets_at;
         const colorClass = config.color;
 
-        let percentageHTML;
-        let timerHTML;
+        const row = createEl('div', `usage-section ${colorClass}`);
 
-        if (key === 'extra_usage') {
-            // Percentage area → spending amounts
-            if (value.used_cents != null && value.limit_cents != null) {
-                const usedDollars = (value.used_cents / 100).toFixed(0);
-                const limitDollars = (value.limit_cents / 100).toFixed(0);
-                percentageHTML = `<span class="usage-percentage extra-spending">$${usedDollars}/$${limitDollars}</span>`;
-            } else {
-                percentageHTML = `<span class="usage-percentage">${Math.round(utilization)}%</span>`;
-            }
-            // Timer area → prepaid balance
-            if (value.balance_cents != null) {
-                const balanceDollars = (value.balance_cents / 100).toFixed(0);
-                timerHTML = `<span class="timer-text extra-balance">Bal $${balanceDollars}</span>`;
-            } else {
-                timerHTML = `<span class="timer-text"></span>`;
-            }
+        // Column 1: label (from config, not API)
+        row.appendChild(createEl('span', 'usage-label', config.label));
+
+        // Column 2: bar group
+        const barGroup = createEl('div', 'usage-bar-group');
+        const progressBar = createEl('div', 'progress-bar');
+        const progressFill = createEl('div', `progress-fill ${colorClass}`);
+        progressFill.style.width = Math.min(utilization, 100) + '%';
+        if (utilization >= 90) progressFill.classList.add('danger');
+        else if (utilization >= 75) progressFill.classList.add('warning');
+        progressBar.appendChild(progressFill);
+        barGroup.appendChild(progressBar);
+
+        // Percentage text
+        if (key === 'extra_usage' && value.used_cents != null && value.limit_cents != null) {
+            const usedDollars = (Number(value.used_cents) / 100).toFixed(0);
+            const limitDollars = (Number(value.limit_cents) / 100).toFixed(0);
+            barGroup.appendChild(createEl('span', 'usage-percentage extra-spending', `$${usedDollars}/$${limitDollars}`));
         } else {
-            percentageHTML = `<span class="usage-percentage">${Math.round(utilization)}%</span>`;
-            const totalMinutes = key.includes('seven_day') ? 7 * 24 * 60 : 5 * 60;
-            timerHTML = `<div class="timer-text" data-resets="${resetsAt || ''}" data-total="${totalMinutes}">--:--</div>`;
+            barGroup.appendChild(createEl('span', 'usage-percentage', Math.round(utilization) + '%'));
+        }
+        row.appendChild(barGroup);
+
+        // Column 3: elapsed group (SVG timer ring)
+        const elapsedGroup = createEl('div', 'usage-elapsed-group');
+        const svgNS = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(svgNS, 'svg');
+        svg.setAttribute('class', 'mini-timer');
+        svg.setAttribute('width', '24');
+        svg.setAttribute('height', '24');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        const circleBg = document.createElementNS(svgNS, 'circle');
+        circleBg.setAttribute('class', 'timer-bg');
+        circleBg.setAttribute('cx', '12');
+        circleBg.setAttribute('cy', '12');
+        circleBg.setAttribute('r', '10');
+        svg.appendChild(circleBg);
+        const circleProgress = document.createElementNS(svgNS, 'circle');
+        circleProgress.setAttribute('class', `timer-progress ${colorClass}`);
+        circleProgress.setAttribute('cx', '12');
+        circleProgress.setAttribute('cy', '12');
+        circleProgress.setAttribute('r', '10');
+        circleProgress.style.strokeDasharray = '63';
+        circleProgress.style.strokeDashoffset = '63';
+        svg.appendChild(circleProgress);
+        elapsedGroup.appendChild(svg);
+        row.appendChild(elapsedGroup);
+
+        // Column 4: timer text
+        if (key === 'extra_usage' && value.balance_cents != null) {
+            const balanceDollars = (Number(value.balance_cents) / 100).toFixed(0);
+            row.appendChild(createEl('span', 'timer-text extra-balance', `Bal $${balanceDollars}`));
+        } else if (key === 'extra_usage') {
+            row.appendChild(createEl('span', 'timer-text'));
+        } else {
+            const timerEl = createEl('div', 'timer-text', '--:--');
+            timerEl.dataset.resets = resetsAt || '';
+            timerEl.dataset.total = key.includes('seven_day') ? String(7 * 24 * 60) : String(5 * 60);
+            row.appendChild(timerEl);
         }
 
-        // Build resets-at text for the 5th grid column
-        let resetsAtHTML = '<div class="resets-at-text"></div>';
+        // Column 5: resets-at
+        const resetsAtEl = createEl('div', 'resets-at-text');
         if (resetsAt) {
             const resetsDate = new Date(resetsAt);
-            const resetsAtStr = resetsDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-            resetsAtHTML = `<div class="resets-at-text">${resetsAtStr}</div>`;
+            if (!isNaN(resetsDate.getTime())) {
+                resetsAtEl.textContent = resetsDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            }
         }
-
-        const row = document.createElement('div');
-        row.className = `usage-section ${colorClass}`;
-        // Match the 5-column grid: label | bar-group | elapsed-group | timer-text | resets-at
-        row.innerHTML = `
-            <span class="usage-label">${config.label}</span>
-            <div class="usage-bar-group">
-                <div class="progress-bar">
-                    <div class="progress-fill ${colorClass}" style="width: ${Math.min(utilization, 100)}%"></div>
-                </div>
-                ${percentageHTML}
-            </div>
-            <div class="usage-elapsed-group">
-                <svg class="mini-timer" width="24" height="24" viewBox="0 0 24 24">
-                    <circle class="timer-bg" cx="12" cy="12" r="10" />
-                    <circle class="timer-progress ${colorClass}" cx="12" cy="12" r="10"
-                        style="stroke-dasharray: 63; stroke-dashoffset: 63" />
-                </svg>
-            </div>
-            ${timerHTML}
-            ${resetsAtHTML}
-        `;
-
-        // Apply warning/danger classes
-        const progressEl = row.querySelector('.progress-fill');
-        if (utilization >= 90) progressEl.classList.add('danger');
-        else if (utilization >= 75) progressEl.classList.add('warning');
+        row.appendChild(resetsAtEl);
 
         elements.extraRows.appendChild(row);
         count++;
@@ -1334,7 +1356,7 @@ function checkThresholdNotifications(data) {
 // Compact mode
 function toggleCompactMode() {
     // Only allow compact when logged in
-    if (!credentials.sessionKey) return;
+    if (!credentials.hasSession) return;
 
     isCompact = !isCompact;
     document.body.classList.toggle('compact', isCompact);
@@ -1936,13 +1958,20 @@ function applyTheme(theme) {
     applyOpacity(currentOpacity);
 }
 
-// Custom CSS injection
+// Custom CSS injection — sanitized to block dangerous patterns
 const customStyleEl = document.createElement('style');
 customStyleEl.id = 'user-custom-css';
 document.head.appendChild(customStyleEl);
 
+const CSS_BLOCK_PATTERNS = [/@import/i, /url\s*\(/i, /expression\s*\(/i, /javascript:/i, /-moz-binding/i];
+
 function applyCustomCSS(css) {
-    customStyleEl.textContent = css || '';
+    if (!css || typeof css !== 'string') { customStyleEl.textContent = ''; return; }
+    if (css.length > 10000) { customStyleEl.textContent = ''; return; }
+    for (const pat of CSS_BLOCK_PATTERNS) {
+        if (pat.test(css)) { customStyleEl.textContent = ''; return; }
+    }
+    customStyleEl.textContent = css;
 }
 
 // Opacity: apply to background alpha + frosted glass blur

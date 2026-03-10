@@ -1,13 +1,71 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, session, shell, Notification, screen, dialog, nativeImage, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, session, shell, Notification, screen, dialog, nativeImage, nativeTheme, safeStorage } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const Store = require('electron-store');
 const { fetchViaWindow } = require('./src/fetch-via-window');
 
+// Non-sensitive settings store (settings, window position, usage history).
+// The encryptionKey is kept for backward-compat with existing installs — it is
+// NOT used for secrets. All secrets use safeStorage (OS keychain) below.
 const store = new Store({
   encryptionKey: 'claude-widget-secure-key-2024'
 });
+
+// --- Secure credential storage via OS keychain (safeStorage) ---
+// Credentials are encrypted with the OS credential manager (DPAPI on Windows,
+// Keychain on macOS, libsecret on Linux) instead of a hardcoded key.
+let inMemorySessionKey = null; // Fallback when safeStorage unavailable
+
+function getSessionKey() {
+  if (safeStorage.isEncryptionAvailable()) {
+    const encrypted = store.get('secure.sessionKey');
+    if (!encrypted) return null;
+    try {
+      return safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
+    } catch { return null; }
+  }
+  return inMemorySessionKey;
+}
+
+function setSessionKeySecure(key) {
+  if (safeStorage.isEncryptionAvailable()) {
+    store.set('secure.sessionKey', safeStorage.encryptString(key).toString('base64'));
+  } else {
+    inMemorySessionKey = key;
+  }
+}
+
+function deleteSessionKeySecure() {
+  store.delete('secure.sessionKey');
+  inMemorySessionKey = null;
+}
+
+// Migrate legacy sessionKey from electron-store to safeStorage on first run.
+// Only delete the legacy key after a durable secure write is confirmed.
+function migrateCredentials() {
+  const legacyKey = store.get('sessionKey');
+  if (legacyKey) {
+    if (safeStorage.isEncryptionAvailable()) {
+      setSessionKeySecure(legacyKey);
+      store.delete('sessionKey'); // Remove from insecure storage
+      debugLog('Migrated sessionKey to safeStorage');
+    } else {
+      // safeStorage unavailable — keep legacy key and use in-memory fallback
+      inMemorySessionKey = legacyKey;
+      debugLog('safeStorage unavailable — using legacy key in memory only');
+    }
+  }
+}
+
+// --- Isolated session partition for Claude API traffic ---
+// All Claude.ai cookies and network traffic use a dedicated session partition,
+// so the main window and tray popup never have access to auth cookies.
+const CLAUDE_PARTITION = 'persist:claude-auth';
+
+function getClaudeSession() {
+  return session.fromPartition(CLAUDE_PARTITION);
+}
 
 // Debug mode: set DEBUG_LOG=1 env var or pass --debug flag to see verbose logs.
 // Regular users will only see critical errors in the console.
@@ -200,14 +258,15 @@ if (process.platform === 'win32') {
   app.setAppUserModelId('com.claudeusage.widget');
 }
 
-// Set session-level User-Agent to avoid Electron detection
+// Set session-level User-Agent on the Claude partition to avoid Electron detection.
+// Only the Claude session needs spoofing — the local UI doesn't make external requests.
 app.on('ready', () => {
-  session.defaultSession.setUserAgent(CHROME_USER_AGENT);
+  getClaudeSession().setUserAgent(CHROME_USER_AGENT);
 });
 
-// Set sessionKey as a cookie in Electron's session
+// Set sessionKey as a cookie in the isolated Claude session (NOT defaultSession)
 async function setSessionCookie(sessionKey) {
-  await session.defaultSession.cookies.set({
+  await getClaudeSession().cookies.set({
     url: 'https://claude.ai',
     name: 'sessionKey',
     value: sessionKey,
@@ -216,7 +275,32 @@ async function setSessionCookie(sessionKey) {
     secure: true,
     httpOnly: true
   });
-  debugLog('sessionKey cookie set in Electron session');
+  debugLog('sessionKey cookie set in Claude session partition');
+}
+
+// --- Navigation guards ---
+// Prevent any BrowserWindow from navigating to unexpected URLs or opening popups.
+function applyNavigationGuards(win, allowedOrigins = []) {
+  win.webContents.on('will-navigate', (event, url) => {
+    // Allow same-origin navigation for local files
+    if (url.startsWith('file://')) return;
+    const allowed = allowedOrigins.some(origin => url.startsWith(origin));
+    if (!allowed) {
+      event.preventDefault();
+      debugLog('Blocked navigation to:', url);
+    }
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    // Open external links in the system browser if they're on the allowlist
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'https:' &&
+          ALLOWED_EXTERNAL_DOMAINS.some(d => parsed.hostname === d || parsed.hostname.endsWith('.' + d))) {
+        shell.openExternal(url);
+      }
+    } catch { /* invalid URL */ }
+    return { action: 'deny' };
+  });
 }
 
 function createMainWindow() {
@@ -233,6 +317,7 @@ function createMainWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
       preload: path.join(__dirname, 'preload.js')
     }
   };
@@ -244,6 +329,9 @@ function createMainWindow() {
   }
 
   mainWindow = new BrowserWindow(windowOptions);
+
+  // Block all navigation — this window only shows local files
+  applyNavigationGuards(mainWindow, []);
 
   // Acrylic blur on Windows 11, vibrancy on macOS.
   // Light mode disables acrylic to prevent dark-tint bleed-through.
@@ -332,14 +420,15 @@ function createTray() {
       {
         label: 'Log Out',
         click: async () => {
-          store.delete('sessionKey');
+          deleteSessionKeySecure();
           store.delete('organizationId');
-          // Clear all Claude.ai cookies and session storage
-          const cookies = await session.defaultSession.cookies.get({ url: 'https://claude.ai' });
+          // Clear all Claude.ai cookies and session storage from Claude partition
+          const claudeSession = getClaudeSession();
+          const cookies = await claudeSession.cookies.get({ url: 'https://claude.ai' });
           for (const cookie of cookies) {
-            await session.defaultSession.cookies.remove('https://claude.ai', cookie.name);
+            await claudeSession.cookies.remove('https://claude.ai', cookie.name);
           }
-          await session.defaultSession.clearStorageData({
+          await claudeSession.clearStorageData({
             storages: ['localstorage', 'sessionstorage', 'cachestorage'],
             origin: 'https://claude.ai'
           });
@@ -419,14 +508,17 @@ function createTrayPopup() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
       backgroundThrottling: false,
       preload: path.join(__dirname, 'preload-tray.js')
     }
   });
 
+  // Block all navigation — tray popup only shows local files
+  applyNavigationGuards(trayPopup, []);
+
   trayPopup.loadFile('src/renderer/tray-popup.html');
 
-  // Keep popup alive when mouse enters the popup window itself
   trayPopup.on('closed', () => { trayPopup = null; });
 }
 
@@ -545,57 +637,62 @@ ipcMain.handle('get-app-version', () => {
   return app.getVersion();
 });
 
-ipcMain.handle('get-credentials', () => {
+// Return auth state WITHOUT the raw session key — renderer only needs to know
+// whether a session exists, not the actual secret.
+ipcMain.handle('get-auth-state', () => {
   return {
-    sessionKey: store.get('sessionKey'),
+    hasSession: !!getSessionKey(),
     organizationId: store.get('organizationId')
   };
 });
 
-ipcMain.handle('save-credentials', async (event, { sessionKey, organizationId }) => {
-  store.set('sessionKey', sessionKey);
-  if (organizationId) {
-    store.set('organizationId', organizationId);
-  }
-  // Also set cookie in Electron session for window-based fetching
-  await setSessionCookie(sessionKey);
-  return true;
-});
-
 ipcMain.handle('delete-credentials', async () => {
-  store.delete('sessionKey');
+  deleteSessionKeySecure();
   store.delete('organizationId');
-  // Remove all Claude.ai cookies
-  const cookies = await session.defaultSession.cookies.get({ url: 'https://claude.ai' });
+  // Remove all Claude.ai cookies from the isolated partition
+  const claudeSession = getClaudeSession();
+  const cookies = await claudeSession.cookies.get({ url: 'https://claude.ai' });
   for (const cookie of cookies) {
-    await session.defaultSession.cookies.remove('https://claude.ai', cookie.name);
+    await claudeSession.cookies.remove('https://claude.ai', cookie.name);
   }
-  // Clear any cached data from the Electron session (storage, cache)
-  // so nothing lingers on shared machines
-  await session.defaultSession.clearStorageData({
+  // Clear any cached data from the Claude session
+  await claudeSession.clearStorageData({
     storages: ['localstorage', 'sessionstorage', 'cachestorage'],
     origin: 'https://claude.ai'
   });
   return true;
 });
 
-// Validate a sessionKey by fetching org ID via hidden BrowserWindow
-ipcMain.handle('validate-session-key', async (event, sessionKey) => {
+// Validate a sessionKey and persist it securely. The renderer sends the key
+// (from manual input) but never gets it back — it stays in main process.
+ipcMain.handle('validate-and-save-session-key', async (event, sessionKey) => {
   debugLog('Validating session key: [redacted]');
   try {
-    // Set the cookie in Electron's session first
+    // Set the cookie in the isolated Claude session
     await setSessionCookie(sessionKey);
 
     // Fetch organizations using hidden BrowserWindow (bypasses Cloudflare)
-    const data = await fetchViaWindow('https://claude.ai/api/organizations');
+    const data = await fetchViaWindow('https://claude.ai/api/organizations', {
+      partition: CLAUDE_PARTITION
+    });
 
     if (data && Array.isArray(data) && data.length > 0) {
       const orgId = data[0].uuid || data[0].id;
+      // Validate org ID format before storing
+      if (!/^[a-f0-9-]{36}$/i.test(orgId)) {
+        await getClaudeSession().cookies.remove('https://claude.ai', 'sessionKey').catch(() => {});
+        return { success: false, error: 'Invalid organization ID format' };
+      }
       debugLog('Session key validated, org ID:', orgId);
+      // Store credentials securely in main process
+      setSessionKeySecure(sessionKey);
+      store.set('organizationId', orgId);
       return { success: true, organizationId: orgId };
     }
 
-    // Check if it's an error response
+    // Validation failed — clean up the cookie
+    await getClaudeSession().cookies.remove('https://claude.ai', 'sessionKey');
+
     if (data && data.error) {
       return { success: false, error: data.error.message || data.error };
     }
@@ -603,8 +700,47 @@ ipcMain.handle('validate-session-key', async (event, sessionKey) => {
     return { success: false, error: 'No organization found' };
   } catch (error) {
     console.error('Session key validation failed:', error.message);
-    // Clean up the invalid cookie
-    await session.defaultSession.cookies.remove('https://claude.ai', 'sessionKey');
+    // Clean up the invalid cookie from Claude session
+    await getClaudeSession().cookies.remove('https://claude.ai', 'sessionKey').catch(() => {});
+    return { success: false, error: error.message };
+  }
+});
+
+// Validate a previously stored session key (used after auto-detect login)
+ipcMain.handle('validate-stored-session', async () => {
+  const sessionKey = getSessionKey();
+  if (!sessionKey) return { success: false, error: 'No stored session' };
+
+  try {
+    await setSessionCookie(sessionKey);
+    const data = await fetchViaWindow('https://claude.ai/api/organizations', {
+      partition: CLAUDE_PARTITION
+    });
+
+    if (data && Array.isArray(data) && data.length > 0) {
+      const orgId = data[0].uuid || data[0].id;
+      // Validate org ID format before storing
+      if (!/^[a-f0-9-]{36}$/i.test(orgId)) {
+        deleteSessionKeySecure();
+        store.delete('organizationId');
+        await getClaudeSession().cookies.remove('https://claude.ai', 'sessionKey').catch(() => {});
+        return { success: false, error: 'Invalid organization ID format' };
+      }
+      store.set('organizationId', orgId);
+      return { success: true, organizationId: orgId };
+    }
+
+    // Validation failed — clean up stale credentials
+    deleteSessionKeySecure();
+    store.delete('organizationId');
+    await getClaudeSession().cookies.remove('https://claude.ai', 'sessionKey').catch(() => {});
+    return { success: false, error: 'No organization found' };
+  } catch (error) {
+    console.error('Stored session validation failed:', error.message);
+    // Clean up on failure
+    deleteSessionKeySecure();
+    store.delete('organizationId');
+    await getClaudeSession().cookies.remove('https://claude.ai', 'sessionKey').catch(() => {});
     return { success: false, error: error.message };
   }
 });
@@ -841,23 +977,70 @@ ipcMain.handle('get-settings', () => {
   };
 });
 
-ipcMain.handle('save-settings', (event, settings) => {
-  // Guard all fields to allow partial saves
-  if (settings.autoStart !== undefined) store.set('settings.autoStart', settings.autoStart);
-  if (settings.minimizeToTray !== undefined) store.set('settings.minimizeToTray', settings.minimizeToTray);
-  if (settings.alwaysOnTop !== undefined) store.set('settings.alwaysOnTop', settings.alwaysOnTop);
-  if (settings.theme !== undefined) store.set('settings.theme', settings.theme);
-  if (settings.accent) store.set('settings.accent', settings.accent);
-  if (settings.customCSS !== undefined) store.set('settings.customCSS', settings.customCSS);
-  if (settings.expanded !== undefined) store.set('settings.expanded', settings.expanded);
-  if (settings.warnThreshold !== undefined) store.set('settings.warnThreshold', settings.warnThreshold);
-  if (settings.dangerThreshold !== undefined) store.set('settings.dangerThreshold', settings.dangerThreshold);
-  if (settings.notifications !== undefined) store.set('settings.notifications', settings.notifications);
-  if (settings.compact !== undefined) store.set('settings.compact', settings.compact);
-  if (settings.refreshInterval) store.set('settings.refreshInterval', settings.refreshInterval);
-  if (settings.opacity != null) {
-    store.set('settings.opacity', settings.opacity);
+// --- Settings validation schema ---
+const VALID_THEMES = ['dark', 'light', 'system'];
+const VALID_ACCENTS = ['mauve', 'blue', 'sapphire', 'teal', 'green', 'yellow', 'peach', 'red', 'pink', 'lavender'];
+const VALID_INTERVALS = [1, 2, 5, 10, 15];
+const CSS_DANGEROUS_PATTERNS = [/@import/i, /url\s*\(/i, /expression\s*\(/i, /javascript:/i, /-moz-binding/i];
+const MAX_CSS_LENGTH = 10000;
+
+function validateBool(v) { return typeof v === 'boolean' ? v : undefined; }
+function validateInt(v, min, max) {
+  const n = typeof v === 'number' ? Math.round(v) : parseInt(v, 10);
+  return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+}
+function validateEnum(v, allowed) { return allowed.includes(v) ? v : undefined; }
+function sanitizeCSS(css) {
+  if (typeof css !== 'string' || css.length > MAX_CSS_LENGTH) return '';
+  for (const pat of CSS_DANGEROUS_PATTERNS) {
+    if (pat.test(css)) return '';
   }
+  return css;
+}
+
+ipcMain.handle('save-settings', (event, settings) => {
+  if (!settings || typeof settings !== 'object') return false;
+
+  // Validate and save each field with strict type/range checks
+  const autoStart = validateBool(settings.autoStart);
+  if (autoStart !== undefined) store.set('settings.autoStart', autoStart);
+
+  const minimizeToTray = validateBool(settings.minimizeToTray);
+  if (minimizeToTray !== undefined) store.set('settings.minimizeToTray', minimizeToTray);
+
+  const alwaysOnTop = validateBool(settings.alwaysOnTop);
+  if (alwaysOnTop !== undefined) store.set('settings.alwaysOnTop', alwaysOnTop);
+
+  const theme = validateEnum(settings.theme, VALID_THEMES);
+  if (theme) store.set('settings.theme', theme);
+
+  const accent = validateEnum(settings.accent, VALID_ACCENTS);
+  if (accent) store.set('settings.accent', accent);
+
+  if (settings.customCSS !== undefined) {
+    store.set('settings.customCSS', sanitizeCSS(settings.customCSS || ''));
+  }
+
+  const expanded = validateBool(settings.expanded);
+  if (expanded !== undefined) store.set('settings.expanded', expanded);
+
+  const warn = validateInt(settings.warnThreshold, 1, 99);
+  if (warn !== undefined) store.set('settings.warnThreshold', warn);
+
+  const danger = validateInt(settings.dangerThreshold, 1, 99);
+  if (danger !== undefined) store.set('settings.dangerThreshold', danger);
+
+  const notifications = validateBool(settings.notifications);
+  if (notifications !== undefined) store.set('settings.notifications', notifications);
+
+  const compact = validateBool(settings.compact);
+  if (compact !== undefined) store.set('settings.compact', compact);
+
+  const interval = validateEnum(settings.refreshInterval, VALID_INTERVALS);
+  if (interval) store.set('settings.refreshInterval', interval);
+
+  const opacity = validateInt(settings.opacity, 10, 100);
+  if (opacity !== undefined) store.set('settings.opacity', opacity);
 
   app.setLoginItemSettings({
     openAtLogin: settings.autoStart,
@@ -885,9 +1068,11 @@ ipcMain.handle('save-settings', (event, settings) => {
 // Do NOT attempt to "fix" this back to an embedded login without verifying
 // that Claude.ai/Cloudflare no longer blocks it.
 ipcMain.handle('detect-session-key', async () => {
-  // Clear any leftover sessionKey cookie
+  const claudeSession = getClaudeSession();
+
+  // Clear any leftover sessionKey cookie from Claude partition
   try {
-    await session.defaultSession.cookies.remove('https://claude.ai', 'sessionKey');
+    await claudeSession.cookies.remove('https://claude.ai', 'sessionKey');
   } catch (e) { /* ignore */ }
 
   return new Promise((resolve) => {
@@ -897,13 +1082,41 @@ ipcMain.handle('detect-session-key', async () => {
       title: 'Log in to Claude',
       webPreferences: {
         nodeIntegration: false,
-        contextIsolation: true
+        contextIsolation: true,
+        sandbox: true,
+        partition: CLAUDE_PARTITION // Use isolated session for login
       }
+    });
+
+    // Navigation guards — only allow Claude.ai during login
+    loginWin.webContents.on('will-navigate', (event, url) => {
+      if (!url.startsWith('https://claude.ai/') && !url.startsWith('https://accounts.google.com/') &&
+          !url.startsWith('https://appleid.apple.com/') && !url.startsWith('https://login.microsoftonline.com/')) {
+        event.preventDefault();
+        debugLog('Blocked login navigation to:', url);
+      }
+    });
+    const OAUTH_ORIGINS = ['https://accounts.google.com/', 'https://appleid.apple.com/', 'https://login.microsoftonline.com/'];
+    loginWin.webContents.setWindowOpenHandler(({ url }) => {
+      // Allow OAuth popups in the login flow
+      if (OAUTH_ORIGINS.some(o => url.startsWith(o))) {
+        return { action: 'allow' };
+      }
+      return { action: 'deny' };
+    });
+    // Harden OAuth child windows that are opened via setWindowOpenHandler
+    loginWin.webContents.on('did-create-window', (childWin) => {
+      childWin.webContents.on('will-navigate', (event, navUrl) => {
+        const allowed = navUrl.startsWith('https://claude.ai/') ||
+                        OAUTH_ORIGINS.some(o => navUrl.startsWith(o));
+        if (!allowed) event.preventDefault();
+      });
+      childWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     });
 
     let resolved = false;
 
-    // Listen for sessionKey cookie being set after login
+    // Listen for sessionKey cookie on the Claude partition
     const onCookieChanged = (event, cookie, cause, removed) => {
       if (
         cookie.name === 'sessionKey' &&
@@ -912,16 +1125,18 @@ ipcMain.handle('detect-session-key', async () => {
         cookie.value
       ) {
         resolved = true;
-        session.defaultSession.cookies.removeListener('changed', onCookieChanged);
+        claudeSession.cookies.removeListener('changed', onCookieChanged);
+        // Store the session key securely — do NOT return it to renderer
+        setSessionKeySecure(cookie.value);
         loginWin.close();
-        resolve({ success: true, sessionKey: cookie.value });
+        resolve({ success: true });
       }
     };
 
-    session.defaultSession.cookies.on('changed', onCookieChanged);
+    claudeSession.cookies.on('changed', onCookieChanged);
 
     loginWin.on('closed', () => {
-      session.defaultSession.cookies.removeListener('changed', onCookieChanged);
+      claudeSession.cookies.removeListener('changed', onCookieChanged);
       if (!resolved) {
         resolve({ success: false, error: 'Login window closed' });
       }
@@ -932,7 +1147,7 @@ ipcMain.handle('detect-session-key', async () => {
 });
 
 ipcMain.handle('fetch-usage-data', async () => {
-  const sessionKey = store.get('sessionKey');
+  const sessionKey = getSessionKey();
   const organizationId = store.get('organizationId');
 
   if (!sessionKey || !organizationId) {
@@ -944,18 +1159,19 @@ ipcMain.handle('fetch-usage-data', async () => {
     throw new Error('Invalid organization ID format');
   }
 
-  // Ensure cookie is set
+  // Ensure cookie is set in the isolated Claude session
   await setSessionCookie(sessionKey);
 
   const usageUrl = `https://claude.ai/api/organizations/${organizationId}/usage`;
   const overageUrl = `https://claude.ai/api/organizations/${organizationId}/overage_spend_limit`;
   const prepaidUrl = `https://claude.ai/api/organizations/${organizationId}/prepaid/credits`;
 
-  // Fetch all endpoints in parallel. Usage is required; overage and prepaid are optional.
+  // Fetch all endpoints in parallel using the Claude partition.
+  const fetchOpts = { partition: CLAUDE_PARTITION };
   const [usageResult, overageResult, prepaidResult] = await Promise.allSettled([
-    fetchViaWindow(usageUrl),
-    fetchViaWindow(overageUrl),
-    fetchViaWindow(prepaidUrl)
+    fetchViaWindow(usageUrl, fetchOpts),
+    fetchViaWindow(overageUrl, fetchOpts),
+    fetchViaWindow(prepaidUrl, fetchOpts)
   ]);
 
   // Usage endpoint is mandatory
@@ -966,7 +1182,7 @@ ipcMain.handle('fetch-usage-data', async () => {
       || error.message.startsWith('CloudflareChallenge')
       || error.message.startsWith('UnexpectedHTML');
     if (isBlocked) {
-      store.delete('sessionKey');
+      deleteSessionKeySecure();
       store.delete('organizationId');
       if (mainWindow) {
         mainWindow.webContents.send('session-expired');
@@ -1019,8 +1235,11 @@ ipcMain.handle('fetch-usage-data', async () => {
 
 // App lifecycle
 app.whenReady().then(async () => {
-  // Restore session cookie if we have stored credentials
-  const sessionKey = store.get('sessionKey');
+  // Migrate legacy credentials from electron-store to safeStorage
+  migrateCredentials();
+
+  // Restore session cookie in the isolated Claude session
+  const sessionKey = getSessionKey();
   if (sessionKey) {
     await setSessionCookie(sessionKey);
   }

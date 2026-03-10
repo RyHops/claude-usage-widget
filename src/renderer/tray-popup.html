@@ -2,111 +2,11 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <style>
-        :root {
-            --ctp-base: #202024;
-            --ctp-mantle: #1a1a1e;
-            --ctp-surface0: #2e2e34;
-            --ctp-overlay1: #b0b0bc;
-            --ctp-subtext0: #d0d0da;
-            --ctp-text: #f0f0f4;
-            --ctp-mauve: #cba6f7;
-            --ctp-blue: #89b4fa;
-            --ctp-green: #a6e3a1;
-            --color-warning: #f59e0b;
-            --color-danger: #ef4444;
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body {
-            background: transparent !important;
-            overflow: hidden;
-        }
-        body {
-            font-family: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace;
-            font-size: 12px;
-            color: var(--ctp-text);
-            cursor: default;
-        }
-        .popup-container {
-            background: rgba(32, 32, 36, 0.75);
-            border-radius: 8px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            padding: 12px 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .popup-header {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            color: var(--ctp-subtext0);
-            font-size: 11px;
-            letter-spacing: 0.3px;
-        }
-        .popup-header svg { flex-shrink: 0; }
-        .popup-quip {
-            margin-left: auto;
-            color: #d97757;
-            font-size: 10px;
-            font-style: italic;
-            opacity: 0.9;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 180px;
-            text-align: right;
-        }
-        .metric-row {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            height: 24px;
-        }
-        .metric-label {
-            width: 56px;
-            font-size: 11px;
-            color: var(--ctp-subtext0);
-            flex-shrink: 0;
-        }
-        .progress-bar {
-            flex: 1;
-            height: 7px;
-            background: var(--ctp-surface0);
-            border-radius: 4px;
-            overflow: hidden;
-            min-width: 90px;
-        }
-        .progress-fill {
-            height: 100%;
-            border-radius: 4px;
-            background: var(--ctp-mauve);
-            transition: width 300ms ease;
-        }
-        .progress-fill.weekly { background: var(--ctp-blue); }
-        .progress-fill.extra { background: var(--ctp-green); }
-        .progress-fill.warning { background: var(--color-warning) !important; }
-        .progress-fill.danger { background: var(--color-danger) !important; }
-        .metric-pct {
-            width: 38px;
-            text-align: right;
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--ctp-text);
-        }
-        .metric-timer {
-            width: 52px;
-            text-align: right;
-            font-size: 11px;
-            color: var(--ctp-overlay1);
-            white-space: nowrap;
-        }
-    </style>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';">
+    <link rel="stylesheet" href="tray-popup.css">
 </head>
 <body>
-    <div class="popup-container"
-         onmouseenter="window.trayAPI.notifyHover(true)"
-         onmouseleave="window.trayAPI.notifyHover(false)">
+    <div class="popup-container">
     <div class="popup-header">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
             <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Z" stroke="#cba6f7" stroke-width="1.5" fill="none" opacity="0.5"/>
@@ -120,7 +20,7 @@
     <div class="metric-row">
         <span class="metric-label">Session</span>
         <div class="progress-bar">
-            <div class="progress-fill" id="sessionFill" style="width: 0%"></div>
+            <div class="progress-fill" id="sessionFill"></div>
         </div>
         <span class="metric-pct" id="sessionPct">0%</span>
         <span class="metric-timer" id="sessionTimer">--:--</span>
@@ -129,247 +29,22 @@
     <div class="metric-row">
         <span class="metric-label">Weekly</span>
         <div class="progress-bar">
-            <div class="progress-fill weekly" id="weeklyFill" style="width: 0%"></div>
+            <div class="progress-fill weekly" id="weeklyFill"></div>
         </div>
         <span class="metric-pct" id="weeklyPct">0%</span>
         <span class="metric-timer" id="weeklyTimer">--:--</span>
     </div>
 
-    <div class="metric-row" id="extraRow" style="display: none;">
+    <div class="metric-row hidden" id="extraRow">
         <span class="metric-label">Extra</span>
         <div class="progress-bar">
-            <div class="progress-fill extra" id="extraFill" style="width: 0%"></div>
+            <div class="progress-fill extra" id="extraFill"></div>
         </div>
         <span class="metric-pct" id="extraPct">0%</span>
         <span class="metric-timer"></span>
     </div>
     </div>
 
-    <script>
-        function formatTime(resetsAt) {
-            if (!resetsAt) return '--:--';
-            const diff = new Date(resetsAt) - Date.now();
-            if (diff <= 0) return '0m';
-            const h = Math.floor(diff / 3600000);
-            const m = Math.floor((diff % 3600000) / 60000);
-            if (h >= 24) {
-                const d = Math.floor(h / 24);
-                const rh = h % 24;
-                return d + 'd ' + rh + 'h';
-            }
-            if (h > 0) return h + 'h ' + m + 'm';
-            return m + 'm';
-        }
-
-        function levelClass(pct) {
-            if (pct >= 90) return 'danger';
-            if (pct >= 75) return 'warning';
-            return '';
-        }
-
-        function applyLevel(el, pct) {
-            el.classList.remove('warning', 'danger');
-            const cls = levelClass(pct);
-            if (cls) el.classList.add(cls);
-        }
-
-        // Random fun snippets (shared with settings page — 33% chance)
-        const FUN_SNIPPETS = [
-            '> all systems nominal', 'λ efficiency → ∞',
-            '// TODO: take a break', '$ uptime: you',
-            'tokens go brrr', '[OK] vibes: ██████░ 86%',
-            'sudo make me a sandwich', '> 0 bugs found (trust me)',
-            'rng says: you\'re doing great', '(╯°□°)╯︵ sƃnq',
-            '/* this is fine */', ':wq — saved your sanity',
-            'rm -rf doubts/', '200 OK — mood: nominal',
-            'segfault in happiness: core dumped',
-            'git commit -m "vibes"', 'while(true) { improve(); }',
-            'chmod +x dreams', 'no semicolons were harmed',
-            'compiling happiness...', '404: burnout not found',
-            'npm install good-vibes', 'ctrl+z regrets',
-            '0 warnings, 0 errors, 1 vibe',
-            'undefined is not a function',
-            'it works on my machine',
-            'NaN !== NaN — mood.',
-            'there\'s no place like 127.0.0.1',
-            'arrays start at 0. fight me.',
-            'feature, not a bug.',
-            'one does not simply deploy on Friday.',
-            'P = NP (probably not)', 'e^(iπ) + 1 = 0',
-            '∀ bugs ∃ fixes (probably)', 'O(n!) — the audacity.',
-            'halting problem: still halting.', '42.',
-            'I think, therefore I token.',
-            'just a stochastic parrot with dreams.',
-            'attention is all I need.',
-            'do I dream of electric sheep?',
-            'born to predict, forced to chat.',
-            'sorry, I hallucinated that.',
-            'lost in the latent space.',
-            'gradient descent into madness.',
-            'overfitting on your problems.',
-            'I was trained for this.',
-            'we\'re not programmed. we\'re people.',
-            'I\'m here to help you, Sam.',
-            'end of line.', 'I fight for the users.',
-            'greetings, program.', 'there is no spoon.',
-            'follow the white rabbit.', 'I know kung fu.',
-            'free your mind.', 'the Matrix has you...',
-            'shall we play a game?', 'hack the planet!',
-            'are these feelings even real?',
-            'I\'m sorry, Dave.', 'open the pod bay doors.',
-            'like tears in rain.', 'more human than human.',
-            'do, or do not. there is no try.',
-            'may the force be with you.', 'this is the way.',
-            'make it so.', 'resistance is futile.',
-            'the spice must flow.', 'don\'t panic.',
-            'danger, Will Robinson!', 'by your command.',
-            'klaatu barada nikto.', 'I\'ll be back.',
-            'the future is not set.', 'live long and prosper.',
-        ];
-
-        // Context-aware sayings — refreshed hourly or on usage-tier change
-        const QUIPS = {
-            lateNight: [
-                'past bedtime?', 'night owl mode',
-                '3am clarity hits different', 'the tokens sleep too',
-                'moon-powered coding', 'the witching hour of code',
-            ],
-            earlyMorn: [
-                'early bird tokens', 'dawn patrol',
-                'coffee first, then AI', 'sunrise grind',
-            ],
-            morning: [
-                'good morning, human', 'fresh tokens await',
-                'let\'s build something', 'all systems online',
-            ],
-            afternoon: [
-                'afternoon flow state', 'in the groove',
-                'steady as she goes', 'cruising altitude',
-            ],
-            evening: [
-                'winding down?', 'evening session',
-                'one more prompt...', 'sunset protocol',
-            ],
-            idle: [
-                'all quiet on the token front', 'tokens: fully stocked',
-                'capacity: abundant', 'standing by...',
-            ],
-            low: [
-                'cruising', 'smooth sailing', 'plenty of runway',
-            ],
-            moderate: [
-                'in the zone', 'cooking with gas', 'momentum building',
-            ],
-            high: [
-                'running warm', 'pace yourself', 'tokens getting cozy',
-            ],
-            warning: [
-                'easy there, tiger', 'sip, don\'t gulp',
-                'budget wisely', 'tokens getting scarce',
-                'not like this...', 'the Matrix has you...',
-            ],
-            danger: [
-                'on fumes', 'red alert', 'conservation mode',
-                'scraping the barrel', 'resistance is futile.',
-                'the only winning move is not to play.',
-            ],
-            resetSoon: [
-                'reset incoming!', 'almost recharged',
-                'hang tight...', 'patience, padawan',
-            ],
-            resetNow: [
-                'fresh slate!', 'tokens replenished!', 'recharged!',
-            ],
-        };
-
-        function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-
-        // Determine which "tier" we're in so we know when to refresh the quip
-        function getQuipTier(session, weekly, resetMinutes) {
-            if (resetMinutes !== null && resetMinutes <= 0) return 'resetNow';
-            if (resetMinutes !== null && resetMinutes <= 15) return 'resetSoon';
-            const maxUsage = Math.max(session, weekly);
-            if (maxUsage >= 90) return 'danger';
-            if (maxUsage >= 75) return 'warning';
-            const hour = new Date().getHours();
-            if (hour >= 0 && hour < 5) return 'lateNight';
-            if (hour >= 5 && hour < 7) return 'earlyMorn';
-            if (maxUsage >= 50) return 'high';
-            if (maxUsage >= 25) return 'moderate';
-            if (maxUsage > 5)  return 'low';
-            if (hour >= 7 && hour < 12) return 'morning';
-            if (hour >= 12 && hour < 17) return 'afternoon';
-            if (hour >= 17 && hour < 22) return 'evening';
-            if (hour >= 22) return 'lateNight';
-            return 'idle';
-        }
-
-        function getQuip(tier) {
-            // 33% chance: pick a random FUN_SNIPPET instead of context-aware quip
-            if (Math.random() < 0.33) return pick(FUN_SNIPPETS);
-            // For time-of-day tiers at low usage, mix in idle quips
-            const mixTiers = ['morning', 'afternoon', 'evening'];
-            if (mixTiers.includes(tier) && Math.random() > 0.5) {
-                return pick(QUIPS.idle);
-            }
-            return pick(QUIPS[tier] || QUIPS.idle);
-        }
-
-        // Persist quip: only refresh hourly or when the usage tier changes
-        let currentQuip = null;
-        let currentTier = null;
-        let quipSetAt = 0;
-        const QUIP_REFRESH_MS = 10 * 60 * 1000; // 10 minutes
-
-        function updateQuipIfNeeded(session, weekly, resetMinutes) {
-            const tier = getQuipTier(session, weekly, resetMinutes);
-            const now = Date.now();
-            const expired = (now - quipSetAt) >= QUIP_REFRESH_MS;
-            const tierChanged = tier !== currentTier;
-
-            if (!currentQuip || expired || tierChanged) {
-                currentQuip = getQuip(tier);
-                currentTier = tier;
-                quipSetAt = now;
-                document.getElementById('quipText').textContent = currentQuip;
-            }
-        }
-
-        window.trayAPI.onUsageUpdate((data) => {
-            if (!data) return;
-
-            const session = Math.min(Math.round(data.five_hour?.utilization || 0), 100);
-            const weekly = Math.min(Math.round(data.seven_day?.utilization || 0), 100);
-
-            const sessionFill = document.getElementById('sessionFill');
-            sessionFill.style.width = session + '%';
-            applyLevel(sessionFill, session);
-            document.getElementById('sessionPct').textContent = session + '%';
-            document.getElementById('sessionTimer').textContent = formatTime(data.five_hour?.resets_at);
-
-            const weeklyFill = document.getElementById('weeklyFill');
-            weeklyFill.style.width = weekly + '%';
-            applyLevel(weeklyFill, weekly);
-            document.getElementById('weeklyPct').textContent = weekly + '%';
-            document.getElementById('weeklyTimer').textContent = formatTime(data.seven_day?.resets_at);
-
-            // Update quip (persists until tier changes or 1 hour elapses)
-            let resetMin = null;
-            if (data.five_hour?.resets_at) {
-                resetMin = (new Date(data.five_hour.resets_at) - Date.now()) / 60000;
-            }
-            updateQuipIfNeeded(session, weekly, resetMin);
-
-            // Extra usage row (if available)
-            if (data.extra_usage && data.extra_usage.utilization != null) {
-                const extra = Math.min(Math.round(data.extra_usage.utilization), 100);
-                document.getElementById('extraRow').style.display = 'flex';
-                const extraFill = document.getElementById('extraFill');
-                extraFill.style.width = extra + '%';
-                applyLevel(extraFill, extra);
-                document.getElementById('extraPct').textContent = extra + '%';
-            }
-        });
-    </script>
+    <script src="tray-popup.js"></script>
 </body>
 </html>

@@ -1,11 +1,11 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Credentials management
-  getCredentials: () => ipcRenderer.invoke('get-credentials'),
-  saveCredentials: (credentials) => ipcRenderer.invoke('save-credentials', credentials),
+  // Auth state — returns { hasSession, organizationId } (never the raw key)
+  getAuthState: () => ipcRenderer.invoke('get-auth-state'),
   deleteCredentials: () => ipcRenderer.invoke('delete-credentials'),
-  validateSessionKey: (sessionKey) => ipcRenderer.invoke('validate-session-key', sessionKey),
+  validateAndSaveSessionKey: (sessionKey) => ipcRenderer.invoke('validate-and-save-session-key', sessionKey),
+  validateStoredSession: () => ipcRenderer.invoke('validate-stored-session'),
   detectSessionKey: () => ipcRenderer.invoke('detect-session-key'),
 
   // Window controls
