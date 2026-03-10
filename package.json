@@ -8,7 +8,8 @@
     "build": "electron-builder",
     "build:win": "electron-builder --win",
     "dev": "cross-env NODE_ENV=development electron .",
-    "build:mac": "electron-builder --mac"
+    "build:mac": "electron-builder --mac",
+    "shortcut": "node scripts/create-shortcut.js"
   },
   "keywords": [
     "claude",

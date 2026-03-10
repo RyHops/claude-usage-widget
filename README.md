@@ -22,6 +22,16 @@ npm install
 npm start
 ```
 
+### Make it Searchable in Windows (optional)
+
+Register the app in the Start Menu so you can find it via Windows Search:
+
+```bash
+npm run shortcut
+```
+
+You can now search **"Claude Usage Widget"** in the Start Menu.
+
 ### Login
 
 1. The widget opens with a login prompt
