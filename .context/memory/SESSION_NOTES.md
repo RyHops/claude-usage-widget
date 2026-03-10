@@ -1,3 +1,19 @@
+## 2026-03-09 16:00 | Documentation Update
+
+**What:** Rewrote README.md with quickstart-first approach. Created FILE_INDEX.md and ARCHITECTURE.md.
+**Docs:** README.md rewritten (quickstart at top, fork-specific). FILE_INDEX.md created (all source files with purposes). ARCHITECTURE.md created (process model, data flow, auth flow, tray hover, taskbar awareness).
+**Reason:** User sharing repo with coworker, needed simple onboarding + admin docs for future maintainability.
+
+---
+
+## 2026-03-09 | Major UI Session — Tray Popup, Taskbar, Icon, Sayings
+
+**What:** Implemented tray hover popup with persistent quirky sayings (sci-fi/dev/AI humor in Claude orange), taskbar awareness (auto-hide detection + edge snapping), app icon regeneration (.ico from gauge design), tooltip removal, popup hover persistence via IPC + cursor polling bridge.
+**Decisions:** 33/67 random vs context-aware quip split; 10-min refresh; DOM mouseenter IPC + getCursorScreenPoint polling for hover bridge; showInactive() to avoid triggering auto-hide taskbar.
+**Gotchas:** Windows native tray tooltip overlaps custom popup — must set tooltip to empty or remove entirely. BrowserWindow mouse events unreliable for frameless transparent windows on Win11 — use DOM IPC instead.
+
+---
+
 ## 2026-03-07 | Cycles 53-87 Continued Improvement Loop
 
 **What:** Executed 35 improvement cycles (53-87). Widget now at ~4400 LOC across 5 files.

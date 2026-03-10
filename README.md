@@ -1,290 +1,153 @@
 # Claude Usage Widget
 
-A beautiful, standalone desktop widget for **Windows and macOS** that displays your Claude.ai usage statistics in real-time.
+A desktop widget for Windows (and macOS) that shows your Claude.ai usage in real-time. Sits in the corner of your screen, always on top.
 
-![Claude Usage Widget - Main](assets/screenshot-main.png)
-
----
-
-## Features
-
-🎯 **Real-time Usage Tracking** — Monitor both session and weekly usage limits
-📊 **Visual Progress Bars** — Clean, gradient progress indicators with configurable warning thresholds
-⏱️ **Countdown Timers** — Circular timers showing time elapsed in the current session window
-🔄 **Auto-refresh** — Updates every 5 minutes automatically
-🎨 **Modern UI** — Sleek, draggable widget with dark theme and rounded corners
-🔒 **Secure** — Encrypted credential storage
-📍 **Always on Top** — User-controlled, stays visible across all workspaces
-💾 **System Tray** — Minimizes to tray for easy access
-⚙️ **Settings Panel** — Persistent preferences for startup, theme, tray, and thresholds
+![Main Widget](pics/app_main.png)
 
 ---
 
-## What's New
+## Quickstart (5 minutes)
 
-### Settings Panel
+### Prerequisites
 
-A full settings overlay with persistent preferences via electron-store.
+- [Node.js 18+](https://nodejs.org) (includes npm)
+- A [Claude.ai](https://claude.ai) account with an active subscription
 
-![Claude Usage Widget - Settings](assets/screenshot-settings.png)
-
-- ⚙️ **Launch at startup** — Auto-start with Windows or macOS login
-- 🖥️ **Always on top** — Now user-controlled (was previously hardcoded on)
-- 📌 **Hide from taskbar** — Tray-only mode
-- 🎨 **Theme selector** — Dark / Light / System
-- ⚠️ **Warning thresholds** — Configurable amber and red levels for usage bars
-
-### Improved Main Widget Layout
-
-- 5-column grid with labeled headers: Session Used / Elapsed / Resets In / Resets At
-- Elapsed column shows a circular timer of how far through the current window you are
-- Resets In shows the countdown separately so it's not confused with elapsed time
-- Resets At shows the actual local clock time (session) or date (weekly reset)
-- Fresh-user state shows "Not started" instead of ambiguous dashes when no session is active
-
-### Quality of Life
-
-- 🔵 Rounded corners matching system window style
-- 🖼️ Tray icon uses the app logo instead of the default Electron robot icon
-
-![Claude Usage Widget - Tray](assets/screenshot-tray.png)
-
-### macOS Support
-
-- Native macOS build with proper `.icns` icon
-- Dock and menu bar tray integration
-- Auto-start on login via macOS Login Items
-
----
-
-## Installation
-
-### Download Pre-built Release
-
-**Windows:**
-1. Download the latest `Claude-Usage-Widget-Setup.exe` from [Releases](../../releases)
-2. Run the installer
-3. Launch "Claude Usage Widget" from the Start Menu
-
-**macOS:**
-1. Download the latest `Claude-Usage-Widget-arm64.dmg` (Apple Silicon) or `Claude-Usage-Widget-x64.dmg` (Intel) from [Releases](../../releases)
-2. Open the DMG and drag the app to your Applications folder
-3. Launch "Claude Usage Widget" from Applications
-
-> **⚠️ macOS Security Notice:** Because this app is not yet notarized with Apple, macOS Gatekeeper may show a "damaged or can't be opened" warning. To fix this, run the following command in Terminal after installing:
-> ```
-> xattr -cr /Applications/Claude\ Usage\ Widget.app
-> ```
-> Then try launching the app again.
-
----
-
-### Build from Source
-
-**Prerequisites:**
-- Node.js 18+ ([Download](https://nodejs.org))
-- npm (comes with Node.js)
+### Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/SlavomirDurej/claude-usage-widget.git
+git clone https://github.com/RyHops/claude-usage-widget.git
 cd claude-usage-widget
-
-# Install dependencies
 npm install
-
-# Run in development mode
 npm start
+```
 
-# Build for Windows
+### Login
+
+1. The widget opens with a login prompt
+2. Click **"Login to Claude"** — a browser window opens
+3. Sign in to your Claude.ai account as usual
+4. The window closes automatically once authenticated
+5. Usage data appears immediately
+
+That's it. The widget is now running.
+
+---
+
+## What You See
+
+### Main Widget
+
+| Element | What it shows |
+|---------|--------------|
+| **Session** bar (purple) | Current 5-hour usage window (0–100%) |
+| **Weekly** bar (blue) | Rolling 7-day usage window (0–100%) |
+| **Timers** | Countdown to next reset + clock time |
+| **History charts** | 24-hour sparklines with Y-axis and threshold lines |
+
+**Color coding:** Purple = normal, Orange = warning (75%+), Red = danger (90%+). Thresholds are configurable.
+
+### Tray Popup
+
+Hover over the system tray icon to see a quick usage summary with a rotating cast of quirky sayings — sci-fi quotes, dev humor, and AI quips in Claude orange.
+
+![Tray Popup](pics/tray_popup.png)
+
+### Settings
+
+Click the gear icon (or right-click title bar) to access settings.
+
+![Settings](pics/app_setting.png)
+
+- **Launch at startup** — auto-start with Windows/macOS login
+- **Always on top** — keep widget visible across all windows
+- **Hide from taskbar** — tray-only mode
+- **Theme** — Dark / Light / System
+- **Accent color** — choose your vibe
+- **Warning/danger thresholds** — customize when bars turn orange/red
+- **Opacity** — make the widget semi-transparent
+- **Custom CSS** — inject your own styles
+- **Export** — download usage history as CSV
+
+---
+
+## Controls
+
+| Action | How |
+|--------|-----|
+| **Move** | Drag the title bar |
+| **Refresh** | Click the refresh icon |
+| **Settings** | Click the gear icon |
+| **Minimize** | Click `−` (hides to system tray) |
+| **Close** | Click `×` (hides to tray — doesn't quit) |
+| **Expand** | Click `▼` to show extra usage details |
+| **Quit** | Right-click tray icon → Exit |
+
+The widget snaps to screen edges and reacts to the Windows auto-hide taskbar.
+
+---
+
+## Build from Source
+
+```bash
+# Windows installer + portable
 npm run build:win
 
-# Build for macOS (must be run on a Mac)
+# macOS DMG (must run on a Mac)
 npm run build:mac
 ```
 
-The installer will be created in the `dist/` folder.
-
----
-
-## Usage
-
-### First Launch
-
-1. Launch the widget
-2. Click "Login to Claude" when prompted
-3. A browser window will open — log in to your Claude.ai account
-4. The widget will automatically capture your session
-5. Usage data will start displaying immediately
-
-### Widget Controls
-
-- **Drag** — Click and drag the title bar to move the widget
-- **Refresh** — Click the refresh icon to update data immediately
-- **Minimize** — Click the minus icon to hide to system tray / dock
-- **Close** — Click the X to minimize to tray (doesn't exit)
-
-### System Tray Menu
-
-Right-click the tray icon for:
-- Show/Hide widget
-- Refresh usage data
-- Re-login (if session expires)
-- Settings
-- Exit application
-
----
-
-## Understanding the Display
-
-### Current Session
-
-| Column | Description |
-|--------|-------------|
-| Session Used | Progress bar showing usage from 0–100% |
-| Elapsed | Circular timer showing how far through the 5-hour window you are |
-| Resets In | Countdown until the session window resets |
-| Resets At | Actual local clock time when the session resets |
-
-**Color Coding:**
-- 🟣 Purple: Normal usage (below warning threshold, default 75%)
-- 🟠 Orange: High usage (above warning threshold)
-- 🔴 Red: Critical usage (above danger threshold, default 90%)
-
-### Weekly Limit
-
-Same layout and color coding as Current Session, tracking your 7-day usage window. Resets At shows the date of the weekly reset.
-
----
-
-## Configuration
-
-### Auto-start on Boot
-
-Enable the **Launch at startup** toggle in the Settings panel (⚙️ icon in the title bar). Works on both Windows and macOS.
-
-### Custom Refresh Interval
-
-Edit `src/renderer/app.js`:
-
-```javascript
-const UPDATE_INTERVAL = 5 * 60 * 1000; // Change to your preference (in milliseconds)
-```
+Output goes to `dist/`.
 
 ---
 
 ## Troubleshooting
 
 **"Login Required" keeps appearing**
-- Your Claude.ai session may have expired
-- Click "Login to Claude" to re-authenticate
-- Check that you're logging into the correct account
+- Session expired. Click "Login to Claude" to re-authenticate.
 
 **Widget not updating**
-- Check your internet connection
-- Click the refresh button manually
-- Ensure Claude.ai is accessible in your region
-- Try re-logging in from the system tray menu
-
-**Widget position not saving**
-- Window position is saved automatically when you drag it
-- Position will be restored when you restart the app
+- Click refresh manually. Check internet. Try re-logging via tray menu.
 
 **Build errors**
-
-If you encounter errors during `npm install` or `npm start`, a clean reinstall resolves most issues caused by stale or corrupted dependencies:
-
 ```bash
-# Remove existing dependencies and lock file, then reinstall clean
 rm -rf node_modules package-lock.json
 npm install
 ```
 
-If you're still hitting errors after a clean install, please open a discussion in the [Support](../../discussions/categories/support) category with your OS version, Node.js version (`node --version`), and the full error output.
-
----
-
-## Privacy & Security
-
-- Your session credentials are stored **locally only** using encrypted storage
-- No data is sent to any third-party servers
-- The widget only communicates with the Claude.ai official API
-- Session cookies are stored using Electron's secure storage
-- Logout completely removes the session key from encrypted storage, clears all Claude.ai cookies, and wipes Electron session storage so nothing lingers on shared machines
-
-### Session Key Storage Details
-
-| Location | Purpose | Cleared on logout? |
-|----------|---------|-------------------|
-| Windows: `%APPDATA%/claude-usage-widget/config.json` (encrypted via electron-store) | Persists credentials between app restarts | Yes |
-| macOS: `~/Library/Application Support/claude-usage-widget/config.json` (encrypted via electron-store) | Persists credentials between app restarts | Yes |
-| Electron in-memory session cookie (`.claude.ai` domain, secure, httpOnly) | Used by hidden BrowserWindow for API requests | Yes |
-
-The encryption key is embedded in the application. This protects against casual file inspection but not against a determined attacker with access to the source code. For shared machines, always log out when finished.
-
----
-
-## Technical Details
-
-**Built with:**
-- Electron 28.0.0
-- Pure JavaScript (no framework overhead)
-- Native Node.js APIs
-- electron-store for secure storage
-
-**API Endpoint:** `https://claude.ai/api/organizations/{org_id}/usage`
-
-**Debug Mode:**
-
+**Debug mode**
 ```bash
-# Via flag
+# Flag
 electron . --debug
 
-# Via env var
+# Environment variable
 DEBUG_LOG=1 npm start
 ```
 
 ---
 
-## Roadmap
+## Privacy
 
-- [x] macOS support
-- [x] Settings panel
-- [x] Remember window position
-- [x] Custom warning thresholds
-- [ ] Linux support
-- [ ] Usage history graphs
-- [ ] Compact mode
-- [ ] Notification alerts at usage thresholds
-- [ ] Multiple account support
-- [ ] Keyboard shortcuts
+- Credentials stored **locally only** (encrypted via electron-store)
+- No third-party servers — only communicates with `claude.ai`
+- Logout clears all stored credentials, cookies, and session data
 
 ---
 
-## Contributing
+## Tech Stack
 
-Contributions are welcome! Please feel free to submit a Pull Request. For feature requests and discussions, visit the [Discussions](../../discussions) tab.
+- Electron 28 + pure JavaScript (no framework)
+- electron-store for encrypted local storage
+- Programmatic PNG/ICO generation (no image dependencies)
 
 ---
 
 ## License
 
-MIT License — feel free to use and modify as needed.
+MIT
 
 ---
 
 ## Disclaimer
 
-This is an unofficial tool and is not affiliated with or endorsed by Anthropic. Use at your own discretion.
-
----
-
-## Support
-
-- **Questions & help** — visit the [Support](../../discussions/categories/support) category in Discussions
-- **Feature requests** — post in [Feature Requests](../../discussions/categories/feature-requests)
-- **Bug reports** — open a new [Issue](../../issues) with your OS version, Node.js version, and any error messages
-
----
-
-Made with ❤️ for the Claude.ai community
+Unofficial tool — not affiliated with or endorsed by Anthropic.
