@@ -26,6 +26,11 @@ const BLOCKED_SIGNATURES = [
 ];
 
 function fetchViaWindow(url, { timeoutMs = 30000 } = {}) {
+  // Only allow requests to the Claude.ai API to prevent session cookie leakage
+  if (!url.startsWith('https://claude.ai/api/')) {
+    return Promise.reject(new Error(`Blocked: URL must start with https://claude.ai/api/, got: ${url}`));
+  }
+
   return new Promise((resolve, reject) => {
     const win = new BrowserWindow({
       width: 800,

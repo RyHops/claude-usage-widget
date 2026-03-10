@@ -5,9 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Claude Usage Widget</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:wght@400;700&display=swap" rel="stylesheet">
+    <!-- Google Fonts CDN removed for privacy — using local system serif fallback -->
     <link rel="stylesheet" href="styles.css">
 </head>
 
@@ -17,27 +15,84 @@
             <!-- Title Bar -->
             <div class="title-bar" id="titleBar">
                 <div class="title">
-                    <img src="../../assets/logo.png" alt="Logo" class="app-logo">
+                    <svg class="app-logo" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Z" stroke="var(--accent)" stroke-width="1.5" fill="none" opacity="0.5"/>
+                        <path d="M8 1.5a6.5 6.5 0 0 1 0 13" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+                        <circle cx="8" cy="1.5" r="1.5" fill="var(--accent)"/>
+                    </svg>
                     <span>Claude Usage</span>
+                    <span class="mode-badge" id="modeBadge"></span>
+                </div>
+                <div class="title-pips" id="titlePips" aria-hidden="true">
+                    <div class="pip-row" id="sessionPips">
+                        <span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span>
+                    </div>
+                    <div class="pip-row weekly" id="weeklyPips">
+                        <span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span>
+                    </div>
+                </div>
+                <div class="status-indicator" id="statusIndicator" role="status" aria-live="polite">
+                    <svg class="status-ring" id="statusRing" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                        <circle class="status-ring-bg" cx="6" cy="6" r="4.5" />
+                        <circle class="status-ring-progress" id="statusRingProgress" cx="6" cy="6" r="4.5"
+                            style="stroke-dasharray: 28.3; stroke-dashoffset: 28.3" />
+                    </svg>
+                    <span class="status-text" id="statusText"></span>
+                    <span class="data-hash" id="dataHash"></span>
                 </div>
                 <div class="controls">
-                    <button class="control-btn settings-btn" id="settingsBtn" title="Settings">⚙️</button>
-                    <button class="control-btn refresh-btn" id="refreshBtn" title="Refresh">
+                    <button class="control-btn settings-btn" id="settingsBtn" title="Settings (Ctrl+,)" aria-label="Settings">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                        </svg>
+                    </button>
+                    <button class="control-btn refresh-btn" id="refreshBtn" title="Refresh (Ctrl+R)" aria-label="Refresh">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6" />
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                         </svg>
                     </button>
-                    <button class="control-btn minimize-btn" id="minimizeBtn" title="Minimise to System Tray">−</button>
-                    <button class="control-btn close-btn" id="closeBtn" title="Exit Application">×</button>
+                    <button class="control-btn minimize-btn" id="minimizeBtn" title="Minimise to System Tray" aria-label="Minimize to tray">−</button>
+                    <button class="control-btn close-btn" id="closeBtn" title="Exit Application" aria-label="Exit application">×</button>
                 </div>
             </div>
 
-            <!-- Loading State -->
+            <!-- Compact Content (polybar-style) -->
+            <div class="compact-content" id="compactContent" style="display: none;">
+                <div class="compact-row">
+                    <span class="compact-sep"></span>
+                    <span class="compact-label">S</span>
+                    <div class="compact-bar">
+                        <div class="compact-fill" id="compactSessionFill" style="width: 0%"></div>
+                    </div>
+                    <span class="compact-pct" id="compactSessionPct">0%</span>
+                    <span class="compact-sep"></span>
+                    <span class="compact-label">W</span>
+                    <div class="compact-bar">
+                        <div class="compact-fill weekly" id="compactWeeklyFill" style="width: 0%"></div>
+                    </div>
+                    <span class="compact-pct" id="compactWeeklyPct">0%</span>
+                    <span class="compact-sep"></span>
+                    <span class="compact-timer" id="compactTimer">--:--</span>
+                    <span class="compact-sep"></span>
+                </div>
+            </div>
+
+            <!-- Loading State (Skeleton) -->
             <div class="loading-container" id="loadingContainer">
-                <div class="spinner"></div>
-                <p>Loading usage data...</p>
+                <div class="skeleton-content">
+                    <div class="skeleton-row">
+                        <div class="skeleton-label-block"></div>
+                        <div class="skeleton-bar-block"><div class="skeleton-shimmer"></div></div>
+                    </div>
+                    <div class="skeleton-row">
+                        <div class="skeleton-label-block"></div>
+                        <div class="skeleton-bar-block"><div class="skeleton-shimmer"></div></div>
+                    </div>
+                </div>
+                <p class="skeleton-status">Connecting to Claude.ai...</p>
             </div>
 
             <!-- Login -->
@@ -96,6 +151,22 @@
                 </div>
             </div>
 
+            <!-- Error State -->
+            <div class="error-container" id="errorContainer" style="display: none;">
+                <div class="error-content">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="12" y1="8" x2="12" y2="12" />
+                        <line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                    <div class="error-text-group">
+                        <h3>Update Failed</h3>
+                        <p id="errorMessage">Could not reach Claude.ai</p>
+                    </div>
+                    <button class="retry-btn" id="retryBtn">Retry</button>
+                </div>
+            </div>
+
             <!-- Main Content -->
             <div class="content" id="mainContent" style="display: none;">
 
@@ -112,10 +183,10 @@
                 <div class="usage-section">
                     <span class="usage-label">Current Session</span>
                     <div class="usage-bar-group">
-                        <div class="progress-bar">
+                        <div class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Session usage">
                             <div class="progress-fill" id="sessionProgress" style="width: 0%"></div>
                         </div>
-                        <span class="usage-percentage" id="sessionPercentage">0%</span>
+                        <span class="usage-percentage" id="sessionPercentage" aria-live="polite">0%</span>
                     </div>
                     <div class="usage-elapsed-group">
                         <svg class="mini-timer" width="24" height="24" viewBox="0 0 24 24">
@@ -129,13 +200,13 @@
                 </div>
 
                 <!-- Weekly Usage -->
-                <div class="usage-section">
+                <div class="usage-section weekly">
                     <span class="usage-label">Weekly Limit</span>
                     <div class="usage-bar-group">
-                        <div class="progress-bar">
+                        <div class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Weekly usage">
                             <div class="progress-fill weekly" id="weeklyProgress" style="width: 0%"></div>
                         </div>
-                        <span class="usage-percentage" id="weeklyPercentage">0%</span>
+                        <span class="usage-percentage" id="weeklyPercentage" aria-live="polite">0%</span>
                     </div>
                     <div class="usage-elapsed-group">
                         <svg class="mini-timer" width="24" height="24" viewBox="0 0 24 24">
@@ -156,8 +227,20 @@
                 </div>
 
                 <!-- Expandable Details -->
-                <div class="expand-section" id="expandSection" style="display: none;">
+                <div class="expand-section" id="expandSection">
                     <div id="extraRows"></div>
+                    <div class="history-chart" id="historyChart" style="display: none;">
+                        <div class="history-row">
+                            <span class="history-label">Session 24h</span>
+                            <div class="history-sparkline" id="sessionSparkline"></div>
+                            <span class="history-trend" id="sessionTrend"></span>
+                        </div>
+                        <div class="history-row">
+                            <span class="history-label">Weekly 24h</span>
+                            <div class="history-sparkline" id="weeklySparkline"></div>
+                            <span class="history-trend" id="weeklyTrend"></span>
+                        </div>
+                    </div>
                 </div>
 
             </div>
@@ -167,7 +250,11 @@
                 <div class="settings-content">
                     <div class="settings-header">
                         <span class="settings-title">Settings</span>
-                        <button class="done-settings-btn" id="closeSettingsBtn" title="Done">Done</button>
+                        <div class="settings-header-controls">
+                            <button class="done-settings-btn" id="closeSettingsBtn" title="Done">Done</button>
+                            <button class="control-btn minimize-btn settings-control" id="settingsMinimizeBtn" title="Minimise to System Tray" aria-label="Minimize to tray">−</button>
+                            <button class="control-btn close-btn settings-control" id="settingsCloseBtn" title="Exit Application" aria-label="Exit application">×</button>
+                        </div>
                     </div>
 
                     <div class="settings-disclaimer">
@@ -203,7 +290,11 @@
                                 </label>
                             </div>
                             <div class="settings-col">
-                                <!-- placeholder for future toggle -->
+                                <span class="settings-row-label">Notifications</span>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="notificationsToggle" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
                             </div>
                         </div>
 
@@ -217,7 +308,51 @@
                             </div>
                         </div>
 
-                        <!-- Row 4: warning thresholds -->
+                        <!-- Row 4: accent color -->
+                        <div class="settings-row">
+                            <span class="settings-row-label">Accent</span>
+                            <div class="accent-selector" id="accentSelector">
+                                <button class="accent-dot active" data-accent="mauve" title="Mauve"></button>
+                                <button class="accent-dot" data-accent="blue" title="Blue"></button>
+                                <button class="accent-dot" data-accent="sapphire" title="Sapphire"></button>
+                                <button class="accent-dot" data-accent="teal" title="Teal"></button>
+                                <button class="accent-dot" data-accent="green" title="Green"></button>
+                                <button class="accent-dot" data-accent="yellow" title="Yellow"></button>
+                                <button class="accent-dot" data-accent="peach" title="Peach"></button>
+                                <button class="accent-dot" data-accent="red" title="Red"></button>
+                                <button class="accent-dot" data-accent="pink" title="Pink"></button>
+                                <button class="accent-dot" data-accent="lavender" title="Lavender"></button>
+                            </div>
+                        </div>
+
+                        <!-- Row 5: refresh interval -->
+                        <div class="settings-row">
+                            <span class="settings-row-label">Refresh</span>
+                            <div class="interval-selector">
+                                <button class="interval-btn" data-interval="1">1m</button>
+                                <button class="interval-btn" data-interval="2">2m</button>
+                                <button class="interval-btn active" data-interval="5">5m</button>
+                                <button class="interval-btn" data-interval="10">10m</button>
+                                <button class="interval-btn" data-interval="15">15m</button>
+                            </div>
+                        </div>
+
+                        <!-- Row 5: opacity -->
+                        <div class="settings-row">
+                            <span class="settings-row-label">Opacity</span>
+                            <div class="opacity-group">
+                                <input type="range" id="opacitySlider" class="opacity-slider" min="10" max="100" value="100">
+                                <span class="opacity-value" id="opacityValue">100%</span>
+                            </div>
+                        </div>
+
+                        <!-- Row 5: custom CSS -->
+                        <div class="settings-row settings-row-vertical">
+                            <span class="settings-row-label">Custom CSS</span>
+                            <textarea id="customCssInput" class="custom-css-input" placeholder=".widget-container { ... }" spellcheck="false" rows="2"></textarea>
+                        </div>
+
+                        <!-- Row 6: warning thresholds -->
                         <div class="settings-row">
                             <span class="settings-row-label">Warn at</span>
                             <div class="threshold-group">
@@ -237,21 +372,60 @@
 
                     <div class="settings-footer">
                         <button class="logout-btn" id="logoutBtn">Log Out</button>
-                        <button class="coffee-btn" id="coffeeBtn">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        <button class="export-btn" id="exportBtn" title="Export usage history as CSV" aria-label="Export history">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M17 8h1a4 4 0 1 1 0 8h-1" />
-                                <path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z" />
-                                <line x1="6" y1="2" x2="6" y2="4" />
-                                <line x1="10" y1="2" x2="10" y2="4" />
-                                <line x1="14" y1="2" x2="14" y2="4" />
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                <polyline points="7 10 12 15 17 10" />
+                                <line x1="12" y1="15" x2="12" y2="3" />
                             </svg>
-                            Buy me a coffee
+                            Export
                         </button>
+                        <span class="fun-snippet" id="funSnippet"></span>
+                        <button class="snippet-refresh-btn" id="snippetRefreshBtn" title="New saying" aria-label="Refresh saying">
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="23 4 23 10 17 10"/>
+                                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                            </svg>
+                        </button>
+                        <span class="version-text" id="versionText"></span>
                     </div>
                 </div>
             </div>
+
+            <!-- Fetch Flash -->
+            <div class="fetch-flash" id="fetchFlash"></div>
         </div>
+    </div>
+
+    <!-- Keyboard Help Overlay -->
+    <div class="help-overlay" id="helpOverlay" style="display: none;">
+        <div class="help-content">
+            <div class="help-title">Keyboard Shortcuts</div>
+            <div class="help-grid">
+                <span class="help-key">Ctrl+R</span><span class="help-desc">Refresh data</span>
+                <span class="help-key">Ctrl+M</span><span class="help-desc">Toggle compact mode</span>
+                <span class="help-key">Ctrl+T</span><span class="help-desc">Toggle click-through</span>
+                <span class="help-key">Ctrl+,</span><span class="help-desc">Open/close settings</span>
+                <span class="help-key">Ctrl+E</span><span class="help-desc">Export history CSV</span>
+                <span class="help-key">Esc</span><span class="help-desc">Close settings/help</span>
+                <span class="help-key">j / k</span><span class="help-desc">Navigate rows</span>
+                <span class="help-key">Enter</span><span class="help-desc">Pin row tooltip</span>
+                <span class="help-key">?</span><span class="help-desc">Toggle this help</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right-click Context Menu -->
+    <div class="context-menu" id="contextMenu" style="display: none;">
+        <div class="context-item" data-action="refresh"><span>Refresh</span><span class="ctx-shortcut">Ctrl+R</span></div>
+        <div class="context-item" data-action="compact"><span>Compact Mode</span><span class="ctx-shortcut">Ctrl+M</span></div>
+        <div class="context-item" data-action="clickthrough"><span>Click-Through</span><span class="ctx-shortcut">Ctrl+T</span></div>
+        <div class="context-item" data-action="settings"><span>Settings</span><span class="ctx-shortcut">Ctrl+,</span></div>
+        <div class="context-item" data-action="export"><span>Export History</span><span class="ctx-shortcut">Ctrl+E</span></div>
+        <div class="context-separator"></div>
+        <div class="context-item" data-action="minimize"><span>Minimize to Tray</span></div>
+        <div class="context-item context-item-danger" data-action="exit"><span>Exit</span></div>
     </div>
 
     <script src="app.js"></script>

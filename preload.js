@@ -11,7 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Window controls
   minimizeWindow: () => ipcRenderer.send('minimize-window'),
   closeWindow: () => ipcRenderer.send('close-window'),
-  resizeWindow: (height) => ipcRenderer.send('resize-window', height),
+  resizeWindow: (height, width) => ipcRenderer.send('resize-window', height, width),
 
   // Window position
   getWindowPosition: () => ipcRenderer.invoke('get-window-position'),
@@ -28,9 +28,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // API
   fetchUsageData: () => ipcRenderer.invoke('fetch-usage-data'),
   openExternal: (url) => ipcRenderer.send('open-external', url),
+  showNotification: (data) => ipcRenderer.send('show-notification', data),
+  saveUsageSnapshot: (data) => ipcRenderer.invoke('save-usage-snapshot', data),
+  getUsageHistory: () => ipcRenderer.invoke('get-usage-history'),
+  setOpacity: (value) => ipcRenderer.send('set-opacity', value),
+  setClickThrough: (enabled) => ipcRenderer.send('set-click-through', enabled),
+  updateTrayTooltip: (text) => ipcRenderer.send('update-tray-tooltip', text),
+  updateTrayIcon: (level, utilization) => ipcRenderer.send('update-tray-icon', level, utilization),
+  updateTheme: (isLight) => ipcRenderer.send('theme-updated', isLight),
+  exportUsageHistory: () => ipcRenderer.invoke('export-usage-history'),
 
   // Platform
   platform: process.platform,
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
 
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),
