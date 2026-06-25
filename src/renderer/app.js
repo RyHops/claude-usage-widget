@@ -592,6 +592,10 @@ async function handleAutoDetect() {
             showMainContent();
             await fetchUsageData();
             startAutoUpdate();
+        } else if (validation.retryable) {
+            // Transient (offline/network) — the captured key was NOT discarded.
+            elements.autoDetectError.textContent =
+                'Couldn’t verify — check your connection and try again.';
         } else {
             elements.autoDetectError.textContent =
                 'Session invalid. Try again or use Manual →';
@@ -638,16 +642,21 @@ async function fetchUsageData() {
         updateVelocityTooltips();
     } catch (error) {
         console.error('Error fetching usage data:', error);
-        if (error.message.includes('SessionExpired') || error.message.includes('Unauthorized')) {
+        const msg = error.message || '';
+        if (msg.includes('SessionExpired') || msg.includes('Unauthorized')) {
+            // Destructive: credentials were cleared in main; show login.
             credentials = { hasSession: false, organizationId: null };
             setStatus('error', 'Session expired');
             showLoginRequired();
         } else {
-            setStatus('error', 'Update failed');
-            debugLog('Failed to fetch usage data');
-            // Show error state only if we have no cached data to display
+            // Non-destructive (offline / transient / unexpected response):
+            // keep showing the last known data and retry on the next cycle.
+            const offline = msg.includes('NetworkOffline');
+            setStatus('error', offline ? 'Offline' : 'Update failed');
+            debugLog('Non-destructive fetch failure:', msg);
+            // Only fall back to a full error screen if we have nothing to show.
             if (!latestUsageData) {
-                showError(error.message || 'Could not reach Claude.ai');
+                showError(offline ? 'No internet connection' : (msg || 'Could not reach Claude.ai'));
             }
         }
     }
@@ -1599,16 +1608,9 @@ function createSparklineSVG(dataPoints, color, width, height) {
     return container;
 }
 
-function calculateTrend(dataPoints) {
-    if (!dataPoints || dataPoints.length < 3) return 'flat';
-    const recent = dataPoints.slice(-6);
-    const first = recent[0];
-    const last = recent[recent.length - 1];
-    const diff = last - first;
-    if (diff > 3) return 'up';
-    if (diff < -3) return 'down';
-    return 'flat';
-}
+// calculateTrend + computeVelocity come from format.js (loaded first). Guard
+// against it failing to load so one missing helper can't white-screen the app.
+const { calculateTrend = () => 'flat', computeVelocity = () => null } = window.ClaudeUsageFormat || {};
 
 function setTrendIndicator(el, trend) {
     const symbols = { up: '\u25B2', down: '\u25BC', flat: '\u25B8' };
@@ -1666,7 +1668,8 @@ async function updateVelocityTooltips() {
     }
 }
 
-// Calculate usage velocity (%/hr) from recent history
+// Calculate usage velocity (%/hr) from recent history. Time-window filtering is
+// done here (Date.now()-based); the pure rate math lives in computeVelocity().
 async function calculateVelocity() {
     const history = await window.electronAPI.getUsageHistory();
     if (!history || history.length < 2) return null;
@@ -1674,17 +1677,7 @@ async function calculateVelocity() {
     // Use last 30 minutes of data for velocity
     const cutoff = Date.now() - 30 * 60 * 1000;
     const recent = history.filter(h => h.timestamp > cutoff);
-    if (recent.length < 2) return null;
-
-    const first = recent[0];
-    const last = recent[recent.length - 1];
-    const hours = (last.timestamp - first.timestamp) / (1000 * 60 * 60);
-    if (hours < 0.01) return null;
-
-    return {
-        session: (last.session - first.session) / hours,
-        weekly: (last.weekly - first.weekly) / hours
-    };
+    return computeVelocity(recent);
 }
 
 async function updateHistoryChart() {

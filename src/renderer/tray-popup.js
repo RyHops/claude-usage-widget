@@ -1,19 +1,8 @@
 // Tray popup logic — extracted from inline script for CSP compliance.
 
-function formatTime(resetsAt) {
-    if (!resetsAt) return '--:--';
-    const diff = new Date(resetsAt) - Date.now();
-    if (diff <= 0) return '0m';
-    const h = Math.floor(diff / 3600000);
-    const m = Math.floor((diff % 3600000) / 60000);
-    if (h >= 24) {
-        const d = Math.floor(h / 24);
-        const rh = h % 24;
-        return d + 'd ' + rh + 'h';
-    }
-    if (h > 0) return h + 'h ' + m + 'm';
-    return m + 'm';
-}
+// formatTime is provided by format.js (loaded before this script). Guard so a
+// load failure degrades gracefully instead of white-screening the popup.
+const { formatTime = () => '--:--' } = window.ClaudeUsageFormat || {};
 
 function levelClass(pct) {
     if (pct >= 90) return 'danger';

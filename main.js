@@ -1,9 +1,11 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, session, shell, Notification, screen, dialog, nativeImage, nativeTheme, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, session, shell, Notification, screen, dialog, nativeImage, nativeTheme, safeStorage, net } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const Store = require('electron-store');
-const { fetchViaWindow } = require('./src/fetch-via-window');
+const { fetchViaWindow, fetchManyViaWindow, screenAndParse, assertClaudeApiUrl } = require('./src/fetch-via-window');
+const { classifyFetchError, isDestructive, isValidUsageShape, looksLikeAuthErrorBody } = require('./src/lib/errors');
+const { validateBool, validateInt, validateEnum, sanitizeCSS } = require('./src/lib/validate');
 
 // Non-sensitive settings store (settings, window position, usage history).
 // The encryptionKey is kept for backward-compat with existing installs — it is
@@ -41,6 +43,16 @@ function deleteSessionKeySecure() {
   inMemorySessionKey = null;
 }
 
+// Clear credentials and tell the renderer to show the login screen. Used when a
+// fetch failure is classified as destructive (auth or an unsolvable Cloudflare
+// challenge — the hidden fetch window cannot complete a CAPTCHA).
+async function forceReLogin() {
+  await clearClaudeCredentials();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('session-expired');
+  }
+}
+
 // Migrate legacy sessionKey from electron-store to safeStorage on first run.
 // The legacy key is ALWAYS deleted from disk — never leave weakly-encrypted
 // secrets around. If safeStorage is unavailable, the user must re-login.
@@ -71,6 +83,28 @@ function getClaudeSession() {
   return session.fromPartition(CLAUDE_PARTITION);
 }
 
+// Clear ALL stored credentials: the safeStorage key, the org id, AND the
+// partition's Claude cookies + cached storage. The sessionKey also lives as an
+// httpOnly cookie in the partition, so deleting only safeStorage would leave a
+// usable auth credential on disk. Used by logout, delete, and forced re-login.
+async function clearClaudeCredentials() {
+  deleteSessionKeySecure();
+  store.delete('organizationId');
+  try {
+    const claudeSession = getClaudeSession();
+    const cookies = await claudeSession.cookies.get({ url: 'https://claude.ai' });
+    for (const cookie of cookies) {
+      await claudeSession.cookies.remove('https://claude.ai', cookie.name);
+    }
+    await claudeSession.clearStorageData({
+      storages: ['localstorage', 'sessionstorage', 'cachestorage'],
+      origin: 'https://claude.ai'
+    });
+  } catch (err) {
+    debugLog('clearClaudeCredentials cleanup failed:', err.message);
+  }
+}
+
 // Debug mode: set DEBUG_LOG=1 env var or pass --debug flag to see verbose logs.
 // Regular users will only see critical errors in the console.
 const DEBUG = process.env.DEBUG_LOG === '1' || process.argv.includes('--debug');
@@ -79,6 +113,13 @@ function debugLog(...args) {
 }
 
 const CHROME_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// Experimental zero-renderer fetch via session.fetch (default OFF). Set
+// USE_SESSION_FETCH=1 to trial it. It avoids spawning a hidden window entirely,
+// but session.fetch may not carry the partition's cf_clearance cookie reliably
+// (see electron/electron#44456), so it falls back to the single hidden window
+// on any Cloudflare signal. Left off until validated on Windows.
+const USE_SESSION_FETCH = process.env.USE_SESSION_FETCH === '1';
 
 // --- PNG icon generator (pure JS, no external deps) ---
 // Generates actual PNG buffers for tray/app icons. SVG data URLs are unreliable
@@ -150,6 +191,8 @@ let trayPopupHoverPoll = null;
 let isTrayHovered = false;
 let isPopupHovered = false;
 let latestUsageDataMain = null;
+let transientRaiseTimer = null; // momentary always-on-top raise on tray show
+let loginWindow = null; // single in-flight login window (detect-session-key)
 
 const WIDGET_WIDTH = 530;
 const WIDGET_HEIGHT = 155;
@@ -256,6 +299,49 @@ function stopTaskbarWatcher() {
   lastWorkArea = null;
 }
 
+// Apply the user's saved always-on-top preference to the main window.
+// Centralized so partial settings saves can't accidentally toggle it off.
+function applyMainAlwaysOnTopPreference() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const alwaysOnTop = store.get('settings.alwaysOnTop', true);
+  mainWindow.setAlwaysOnTop(alwaysOnTop, alwaysOnTop ? 'pop-up-menu' : 'normal');
+}
+
+// Show the widget from a tray click / "Show Widget" menu item.
+//
+// Z-order: showInactive() preserves the original intent of NOT activating the
+// window (which would reveal an auto-hide taskbar), but on its own it leaves a
+// non-topmost window buried behind the foreground app. We therefore raise it
+// with a momentary always-on-top + moveTop(), then revert to the user's saved
+// preference after the compositor has painted it in front. setAlwaysOnTop/
+// moveTop change z-order without taking keyboard focus, so the taskbar stays put.
+function showMainWindowFromTray() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow();
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  if (mainWindow.isMinimized()) mainWindow.restore();
+
+  mainWindow.showInactive();
+  adjustForTaskbar();
+
+  clearTimeout(transientRaiseTimer);
+  mainWindow.setAlwaysOnTop(true, 'pop-up-menu');
+  mainWindow.moveTop();
+
+  transientRaiseTimer = setTimeout(() => {
+    transientRaiseTimer = null;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    // Revert to the saved preference. If the user wants it off, drop topmost
+    // but keep it at the top of the normal z-order so it stays visible now.
+    applyMainAlwaysOnTopPreference();
+    if (!store.get('settings.alwaysOnTop', true)) mainWindow.moveTop();
+  }, 100);
+
+  startTaskbarWatcher();
+}
+
 // Set Windows App User Model ID so the taskbar shows our icon, not Electron's.
 // Must be called before app is ready.
 if (process.platform === 'win32') {
@@ -307,7 +393,7 @@ function applyNavigationGuards(win, allowedOrigins = []) {
   });
 }
 
-function createMainWindow() {
+function createMainWindow({ startHidden = false } = {}) {
   const savedPosition = store.get('windowPosition');
   const windowOptions = {
     width: WIDGET_WIDTH,
@@ -317,6 +403,9 @@ function createMainWindow() {
     alwaysOnTop: true,
     resizable: false,
     skipTaskbar: false,
+    // When launched at login with --hidden, the window must start invisible
+    // (BrowserWindow defaults to show:true). The tray remains available.
+    show: !startHidden,
     icon: createAppIcon(),
     webPreferences: {
       nodeIntegration: false,
@@ -385,6 +474,9 @@ function createMainWindow() {
   });
 
   mainWindow.on('closed', () => {
+    clearTimeout(transientRaiseTimer);
+    transientRaiseTimer = null;
+    stopTaskbarWatcher();
     mainWindow = null;
   });
 
@@ -402,14 +494,7 @@ function createTray() {
       {
         label: 'Show Widget',
         click: () => {
-          if (mainWindow) {
-            mainWindow.showInactive();
-            adjustForTaskbar();
-            startTaskbarWatcher();
-          } else {
-            createMainWindow();
-            startTaskbarWatcher();
-          }
+          showMainWindowFromTray();
         }
       },
       {
@@ -420,25 +505,15 @@ function createTray() {
           }
         }
       },
+      {
+        label: 'Check for Updates…',
+        click: () => checkForUpdates(),
+      },
       { type: 'separator' },
       {
         label: 'Log Out',
         click: async () => {
-          deleteSessionKeySecure();
-          store.delete('organizationId');
-          // Clear all Claude.ai cookies and session storage from Claude partition
-          const claudeSession = getClaudeSession();
-          const cookies = await claudeSession.cookies.get({ url: 'https://claude.ai' });
-          for (const cookie of cookies) {
-            await claudeSession.cookies.remove('https://claude.ai', cookie.name);
-          }
-          await claudeSession.clearStorageData({
-            storages: ['localstorage', 'sessionstorage', 'cachestorage'],
-            origin: 'https://claude.ai'
-          });
-          if (mainWindow) {
-            mainWindow.webContents.send('session-expired');
-          }
+          await forceReLogin();
         }
       },
       { type: 'separator' },
@@ -461,17 +536,11 @@ function createTray() {
     });
 
     tray.on('click', () => {
-      if (mainWindow) {
-        if (mainWindow.isVisible()) {
-          mainWindow.hide();
-          stopTaskbarWatcher();
-        } else {
-          // Use showInactive to avoid triggering auto-hide taskbar,
-          // then adjust position for current workArea
-          mainWindow.showInactive();
-          adjustForTaskbar();
-          startTaskbarWatcher();
-        }
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+        mainWindow.hide();
+        stopTaskbarWatcher();
+      } else {
+        showMainWindowFromTray();
       }
     });
 
@@ -545,19 +614,36 @@ function positionAndShowTrayPopup() {
   if (!trayPopup || !tray) return;
 
   try {
-    // Position above the tray icon
     const trayBounds = tray.getBounds();
-    if (!trayBounds || (trayBounds.x === 0 && trayBounds.y === 0 && trayBounds.width === 0)) {
-      // Fallback: position at bottom-right of primary display
-      const display = screen.getPrimaryDisplay();
-      const wa = display.workArea;
-      trayPopup.setPosition(wa.x + wa.width - 330, wa.y + wa.height - 120);
+    const popupBounds = trayPopup.getBounds();
+    // Win11 sometimes reports {0,0,0} for tray bounds. When that happens, anchor
+    // to the cursor (the user just clicked/hovered the tray) on whatever display
+    // the cursor is on — this keeps the popup on the correct monitor for setups
+    // with a secondary taskbar instead of dumping it on the primary display.
+    const invalidTrayBounds = !trayBounds || trayBounds.width <= 0 || trayBounds.height <= 0;
+
+    let x, y, anchorPoint;
+    if (invalidTrayBounds) {
+      // Place relative to the cursor's position on its display: below the cursor
+      // if it's in the top half (top taskbar), above it otherwise (bottom taskbar).
+      const cursor = screen.getCursorScreenPoint();
+      const wa = screen.getDisplayNearestPoint(cursor).workArea;
+      const cursorInTopHalf = cursor.y < wa.y + wa.height / 2;
+      x = Math.round(cursor.x - popupBounds.width / 2);
+      y = Math.round(cursorInTopHalf ? cursor.y + 16 : cursor.y - popupBounds.height - 16);
+      anchorPoint = cursor;
     } else {
-      const popupBounds = trayPopup.getBounds();
-      const x = Math.round(trayBounds.x - popupBounds.width / 2 + trayBounds.width / 2);
-      const y = Math.round(trayBounds.y - popupBounds.height - 4);
-      trayPopup.setPosition(x, y);
+      x = Math.round(trayBounds.x - popupBounds.width / 2 + trayBounds.width / 2);
+      y = Math.round(trayBounds.y - popupBounds.height - 4);
+      anchorPoint = { x: trayBounds.x + trayBounds.width / 2, y: trayBounds.y };
     }
+
+    // Clamp into the work area of the display the popup is anchored to, so it
+    // never lands off-screen (e.g. a tray near a screen edge, or mixed-DPI).
+    const wa = screen.getDisplayNearestPoint(anchorPoint).workArea;
+    x = Math.max(wa.x, Math.min(x, wa.x + wa.width - popupBounds.width));
+    y = Math.max(wa.y, Math.min(y, wa.y + wa.height - popupBounds.height));
+    trayPopup.setPosition(x, y);
 
     trayPopup.setAlwaysOnTop(true, 'screen-saver');
     trayPopup.showInactive();
@@ -651,19 +737,7 @@ ipcMain.handle('get-auth-state', () => {
 });
 
 ipcMain.handle('delete-credentials', async () => {
-  deleteSessionKeySecure();
-  store.delete('organizationId');
-  // Remove all Claude.ai cookies from the isolated partition
-  const claudeSession = getClaudeSession();
-  const cookies = await claudeSession.cookies.get({ url: 'https://claude.ai' });
-  for (const cookie of cookies) {
-    await claudeSession.cookies.remove('https://claude.ai', cookie.name);
-  }
-  // Clear any cached data from the Claude session
-  await claudeSession.clearStorageData({
-    storages: ['localstorage', 'sessionstorage', 'cachestorage'],
-    origin: 'https://claude.ai'
-  });
+  await clearClaudeCredentials();
   return true;
 });
 
@@ -725,27 +799,31 @@ ipcMain.handle('validate-stored-session', async () => {
       const orgId = data[0].uuid || data[0].id;
       // Validate org ID format before storing
       if (!/^[a-f0-9-]{36}$/i.test(orgId)) {
-        deleteSessionKeySecure();
-        store.delete('organizationId');
-        await getClaudeSession().cookies.remove('https://claude.ai', 'sessionKey').catch(() => {});
+        await clearClaudeCredentials();
         return { success: false, error: 'Invalid organization ID format' };
       }
       store.set('organizationId', orgId);
       return { success: true, organizationId: orgId };
     }
 
-    // Validation failed — clean up stale credentials
-    deleteSessionKeySecure();
-    store.delete('organizationId');
-    await getClaudeSession().cookies.remove('https://claude.ai', 'sessionKey').catch(() => {});
-    return { success: false, error: 'No organization found' };
+    // Empty/error response. Only clear the stored key if it looks like an auth
+    // failure; an unexpected non-auth body is treated as retryable (keep key).
+    if (looksLikeAuthErrorBody(data)) {
+      await clearClaudeCredentials();
+      return { success: false, error: data?.error?.message || 'Session invalid' };
+    }
+    return { success: false, error: 'No organization found', retryable: true };
   } catch (error) {
     console.error('Stored session validation failed:', error.message);
-    // Clean up on failure
-    deleteSessionKeySecure();
-    store.delete('organizationId');
-    await getClaudeSession().cookies.remove('https://claude.ai', 'sessionKey').catch(() => {});
-    return { success: false, error: error.message };
+    // Only destructive (auth/cloudflare) failures clear the saved session.
+    // Transient network/unknown failures must NOT wipe a valid stored key —
+    // otherwise opening the app offline logs the user out.
+    const kind = classifyFetchError(error);
+    if (isDestructive(kind)) {
+      await clearClaudeCredentials();
+      return { success: false, error: error.message };
+    }
+    return { success: false, error: error.message, retryable: true };
   }
 });
 
@@ -982,25 +1060,11 @@ ipcMain.handle('get-settings', () => {
 });
 
 // --- Settings validation schema ---
+// Validators live in src/lib/validate.js (pure + unit-tested). The allowed-value
+// sets stay here as domain config passed into validateEnum.
 const VALID_THEMES = ['dark', 'light', 'system'];
 const VALID_ACCENTS = ['mauve', 'blue', 'sapphire', 'teal', 'green', 'yellow', 'peach', 'red', 'pink', 'lavender'];
 const VALID_INTERVALS = [1, 2, 5, 10, 15];
-const CSS_DANGEROUS_PATTERNS = [/@import/i, /url\s*\(/i, /expression\s*\(/i, /javascript:/i, /-moz-binding/i];
-const MAX_CSS_LENGTH = 10000;
-
-function validateBool(v) { return typeof v === 'boolean' ? v : undefined; }
-function validateInt(v, min, max) {
-  const n = typeof v === 'number' ? Math.round(v) : parseInt(v, 10);
-  return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
-}
-function validateEnum(v, allowed) { return allowed.includes(v) ? v : undefined; }
-function sanitizeCSS(css) {
-  if (typeof css !== 'string' || css.length > MAX_CSS_LENGTH) return '';
-  for (const pat of CSS_DANGEROUS_PATTERNS) {
-    if (pat.test(css)) return '';
-  }
-  return css;
-}
 
 ipcMain.handle('save-settings', (event, settings) => {
   if (!settings || typeof settings !== 'object') return false;
@@ -1046,18 +1110,27 @@ ipcMain.handle('save-settings', (event, settings) => {
   const opacity = validateInt(settings.opacity, 10, 100);
   if (opacity !== undefined) store.set('settings.opacity', opacity);
 
+  // Apply side effects from the EFFECTIVE stored values, never the raw payload.
+  // A partial save (e.g. saveSettings({ expanded: true }) on expand toggle)
+  // leaves these fields undefined; applying them raw would silently disable
+  // open-at-login, toggle skipTaskbar, and switch off always-on-top at runtime.
+  const effectiveAutoStart = store.get('settings.autoStart', false);
+  const effectiveMinimizeToTray = store.get('settings.minimizeToTray', false);
+
   app.setLoginItemSettings({
-    openAtLogin: settings.autoStart,
-    ...(process.platform !== 'darwin' && { path: app.getPath('exe') })
+    openAtLogin: effectiveAutoStart,
+    // Launch silently into the tray at login (Windows). macOS uses openAsHidden.
+    openAsHidden: true,
+    ...(process.platform !== 'darwin' && { path: app.getPath('exe'), args: ['--hidden'] })
   });
 
   if (mainWindow) {
     if (process.platform === 'darwin') {
-      if (settings.minimizeToTray) { app.dock.hide(); } else { app.dock.show(); }
+      if (effectiveMinimizeToTray) { app.dock.hide(); } else { app.dock.show(); }
     } else {
-      mainWindow.setSkipTaskbar(settings.minimizeToTray);
+      mainWindow.setSkipTaskbar(effectiveMinimizeToTray);
     }
-    mainWindow.setAlwaysOnTop(settings.alwaysOnTop, settings.alwaysOnTop ? 'pop-up-menu' : 'normal');
+    applyMainAlwaysOnTopPreference();
   }
 
   return true;
@@ -1072,6 +1145,15 @@ ipcMain.handle('save-settings', (event, settings) => {
 // Do NOT attempt to "fix" this back to an embedded login without verifying
 // that Claude.ai/Cloudflare no longer blocks it.
 ipcMain.handle('detect-session-key', async () => {
+  // In-flight guard: if a login window is already open, focus it instead of
+  // opening a second one (concurrent windows share the partition + cookie
+  // listener and race each other).
+  if (loginWindow && !loginWindow.isDestroyed()) {
+    if (loginWindow.isMinimized()) loginWindow.restore();
+    loginWindow.focus();
+    return { success: false, error: 'Login already in progress' };
+  }
+
   const claudeSession = getClaudeSession();
 
   // Clear any leftover sessionKey cookie from Claude partition
@@ -1091,6 +1173,7 @@ ipcMain.handle('detect-session-key', async () => {
         partition: CLAUDE_PARTITION // Use isolated session for login
       }
     });
+    loginWindow = loginWin; // mark in-flight
 
     // Navigation guards — only allow Claude.ai during login
     loginWin.webContents.on('will-navigate', (event, url) => {
@@ -1141,14 +1224,94 @@ ipcMain.handle('detect-session-key', async () => {
 
     loginWin.on('closed', () => {
       claudeSession.cookies.removeListener('changed', onCookieChanged);
+      // Identity check: only clear the marker if THIS window is still the
+      // in-flight one (a later window may have replaced it during a close gap).
+      if (loginWindow === loginWin) loginWindow = null;
       if (!resolved) {
         resolve({ success: false, error: 'Login window closed' });
       }
     });
 
-    loginWin.loadURL('https://claude.ai/login');
+    // Fail fast if the INITIAL login page can't load (offline/DNS). We ignore
+    // ERR_ABORTED (-3) and any failure after the first successful load, so the
+    // normal multi-navigation OAuth flow isn't killed mid-login.
+    let firstLoadOk = false;
+    loginWin.webContents.on('did-finish-load', () => { firstLoadOk = true; });
+    loginWin.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (isMainFrame === false || firstLoadOk || errorCode === -3) return;
+      if (!resolved && !loginWin.isDestroyed()) {
+        resolved = true;
+        loginWin.close(); // 'closed' handler clears the marker + resolves are guarded
+        resolve({ success: false, error: `LoadFailed: ${errorCode} ${errorDescription}` });
+      }
+    });
+
+    loginWin.loadURL('https://claude.ai/login').catch(() => { /* surfaced via did-fail-load */ });
   });
 });
+
+// Experimental: fetch one Claude API JSON endpoint via session.fetch (no window).
+// Pins the FULL partition cookie jar (sessionKey + cf_clearance/__cf_bm) as a
+// Cookie header — mitigates electron#44456 where session.fetch may use default-
+// session cookies. Treats 3xx as a Cloudflare signal (don't trust response.url).
+async function fetchClaudeApiViaSession(url) {
+  assertClaudeApiUrl(url);
+  const claudeSession = getClaudeSession();
+  if (typeof claudeSession.fetch !== 'function') {
+    throw new Error('SessionFetchUnavailable: session.fetch not supported');
+  }
+  const cookies = await claudeSession.cookies.get({ url: 'https://claude.ai' });
+  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+  const resp = await claudeSession.fetch(url, {
+    method: 'GET',
+    credentials: 'include',
+    cache: 'no-store',
+    redirect: 'manual',
+    headers: { accept: 'application/json, text/plain, */*', Cookie: cookieHeader }
+  });
+  // Never log cookieHeader. 3xx → route to the window fallback (likely a CF/login redirect).
+  if (resp.status >= 300 && resp.status < 400) {
+    throw new Error(`CloudflareChallenge: redirect HTTP ${resp.status}`);
+  }
+  // Screen the body BEFORE treating 401/403 as auth: Cloudflare challenges are
+  // often served as 403 + HTML, which must route to the window fallback (so the
+  // real browser can clear the challenge) rather than logging the user out.
+  const text = await resp.text();
+  try {
+    const parsed = screenAndParse(text);
+    if (resp.status === 401 || resp.status === 403) {
+      throw new Error(`SessionExpired: HTTP ${resp.status}`);
+    }
+    return parsed;
+  } catch (err) {
+    if (classifyFetchError(err) === 'cloudflare') throw err; // → window fallback
+    if (resp.status === 401 || resp.status === 403) {
+      throw new Error(`SessionExpired: HTTP ${resp.status}`);
+    }
+    throw err;
+  }
+}
+
+// Fetch usage (mandatory) + overage + prepaid. Default path uses ONE hidden
+// window (fetchManyViaWindow). The experimental session.fetch path is tried
+// first only when USE_SESSION_FETCH=1, and falls back to the window batch when
+// the mandatory endpoint hits Cloudflare or session.fetch is unavailable.
+async function fetchUsageEndpoints(urls) {
+  const fetchOpts = { partition: CLAUDE_PARTITION };
+  if (USE_SESSION_FETCH) {
+    const results = await Promise.allSettled(urls.map((u) => fetchClaudeApiViaSession(u)));
+    const usage = results[0];
+    if (usage.status === 'fulfilled') return results;
+    const kind = classifyFetchError(usage.reason);
+    const unavailable = /SessionFetchUnavailable/.test(usage.reason?.message || '');
+    if (kind === 'cloudflare' || unavailable) {
+      debugLog('session.fetch fell back to window batch (%s)', unavailable ? 'unavailable' : 'cloudflare');
+      return fetchManyViaWindow(urls, fetchOpts);
+    }
+    return results; // auth/network — window fallback wouldn't help
+  }
+  return fetchManyViaWindow(urls, fetchOpts);
+}
 
 ipcMain.handle('fetch-usage-data', async () => {
   const sessionKey = getSessionKey();
@@ -1163,6 +1326,13 @@ ipcMain.handle('fetch-usage-data', async () => {
     throw new Error('Invalid organization ID format');
   }
 
+  // Offline pre-check. net.isOnline() returning false is reliable; true is
+  // inconclusive (so we never gate on true). Skipping the fetch when offline
+  // avoids misclassifying a captured error page as an auth failure.
+  if (net.isOnline && net.isOnline() === false) {
+    throw new Error('NetworkOffline: no internet connection');
+  }
+
   // Ensure cookie is set in the isolated Claude session
   await setSessionCookie(sessionKey);
 
@@ -1170,33 +1340,39 @@ ipcMain.handle('fetch-usage-data', async () => {
   const overageUrl = `https://claude.ai/api/organizations/${organizationId}/overage_spend_limit`;
   const prepaidUrl = `https://claude.ai/api/organizations/${organizationId}/prepaid/credits`;
 
-  // Fetch all endpoints in parallel using the Claude partition.
-  const fetchOpts = { partition: CLAUDE_PARTITION };
-  const [usageResult, overageResult, prepaidResult] = await Promise.allSettled([
-    fetchViaWindow(usageUrl, fetchOpts),
-    fetchViaWindow(overageUrl, fetchOpts),
-    fetchViaWindow(prepaidUrl, fetchOpts)
-  ]);
+  // Fetch usage (mandatory) + overage + prepaid. One hidden window by default;
+  // returns settled-style results in [usage, overage, prepaid] order.
+  const [usageResult, overageResult, prepaidResult] =
+    await fetchUsageEndpoints([usageUrl, overageUrl, prepaidUrl]);
 
-  // Usage endpoint is mandatory
+  // Usage endpoint is mandatory. Classify the failure: only 'auth' and
+  // 'cloudflare' clear credentials (cloudflare needs a visible re-login the
+  // hidden window can't perform). 'network'/'unknown' are non-destructive —
+  // we rethrow so the renderer keeps showing the last known data.
   if (usageResult.status === 'rejected') {
     const error = usageResult.reason;
-    debugLog('API request failed:', error.message);
-    const isBlocked = error.message.startsWith('CloudflareBlocked')
-      || error.message.startsWith('CloudflareChallenge')
-      || error.message.startsWith('UnexpectedHTML');
-    if (isBlocked) {
-      deleteSessionKeySecure();
-      store.delete('organizationId');
-      if (mainWindow) {
-        mainWindow.webContents.send('session-expired');
-      }
+    const kind = classifyFetchError(error);
+    debugLog('Usage fetch failed (%s):', kind, error.message);
+    if (isDestructive(kind)) {
+      await forceReLogin();
       throw new Error('SessionExpired');
     }
     throw error;
   }
 
   const data = usageResult.value;
+
+  // Guard against a 200-with-error or malformed body being rendered as a false
+  // "no usage" state. An auth-signalled error body forces re-login; anything
+  // else is treated as a transient unexpected response (keep cached data).
+  if (!isValidUsageShape(data)) {
+    debugLog('Usage response failed shape validation:', JSON.stringify(data).slice(0, 200));
+    if (looksLikeAuthErrorBody(data)) {
+      await forceReLogin();
+      throw new Error('SessionExpired');
+    }
+    throw new Error('UnexpectedResponse: usage payload missing expected fields');
+  }
 
   // Merge overage spending data into data.extra_usage
   if (overageResult.status === 'fulfilled' && overageResult.value) {
@@ -1237,6 +1413,45 @@ ipcMain.handle('fetch-usage-data', async () => {
   return data;
 });
 
+// --- Auto-update (electron-updater + GitHub Releases) ---
+// Inert in development (app.isPackaged === false) and never crashes the widget:
+// every updater interaction is wrapped so failures only log. Unsigned Windows
+// builds still update (with a SmartScreen prompt); macOS auto-update requires a
+// signed build + the zip target, so it won't function on unsigned builds.
+let autoUpdaterRef; // undefined=untried, false=unavailable, object=ready
+function getAutoUpdater() {
+  if (autoUpdaterRef !== undefined) return autoUpdaterRef || null;
+  try {
+    const { autoUpdater } = require('electron-updater');
+    autoUpdater.on('error', (err) => debugLog('autoUpdater error:', err?.message || err));
+    autoUpdaterRef = autoUpdater;
+  } catch (err) {
+    debugLog('electron-updater unavailable:', err?.message || err);
+    autoUpdaterRef = false;
+  }
+  return autoUpdaterRef || null;
+}
+
+function checkForUpdates() {
+  if (!app.isPackaged) {
+    debugLog('Update check skipped (dev build, not packaged)');
+    return;
+  }
+  const updater = getAutoUpdater();
+  if (!updater) return;
+  try {
+    // Returns a promise that REJECTS on offline / GitHub rate-limit / bad
+    // release metadata. Without .catch() that's an unhandled rejection, which
+    // can crash the app — so swallow it (errors are advisory for a widget).
+    const p = updater.checkForUpdatesAndNotify();
+    if (p && typeof p.catch === 'function') {
+      p.catch((err) => debugLog('checkForUpdatesAndNotify failed:', err?.message || err));
+    }
+  } catch (err) {
+    debugLog('checkForUpdatesAndNotify threw:', err?.message || err);
+  }
+}
+
 // App lifecycle
 app.whenReady().then(async () => {
   // Migrate legacy credentials from electron-store to safeStorage
@@ -1248,7 +1463,11 @@ app.whenReady().then(async () => {
     await setSessionCookie(sessionKey);
   }
 
-  createMainWindow();
+  // Auto-start launches inject --hidden so the widget boots silently into the
+  // tray instead of popping the window open over the user's login.
+  const startHidden = process.argv.includes('--hidden');
+
+  createMainWindow({ startHidden });
   createTray();
   createTrayPopup(); // Pre-create hidden popup so it appears instantly on hover/click
 
@@ -1258,19 +1477,21 @@ app.whenReady().then(async () => {
     adjustForTaskbar();
   });
 
-  // Start taskbar watcher since window is visible after creation
-  startTaskbarWatcher();
+  // Only watch the taskbar when the window is actually visible (skip on hidden start).
+  if (!startHidden) startTaskbarWatcher();
+
+  // Check for updates on launch (no-op in dev / on failure).
+  checkForUpdates();
 
   // Apply persisted settings
   const minimizeToTray = store.get('settings.minimizeToTray', false);
-  const alwaysOnTop = store.get('settings.alwaysOnTop', true);
   if (mainWindow) {
     if (process.platform === 'darwin') {
       if (minimizeToTray) app.dock.hide();
     } else {
       if (minimizeToTray) mainWindow.setSkipTaskbar(true);
     }
-    mainWindow.setAlwaysOnTop(alwaysOnTop, alwaysOnTop ? 'pop-up-menu' : 'normal');
+    applyMainAlwaysOnTopPreference();
   }
 });
 
@@ -1281,9 +1502,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (mainWindow === null) {
-    createMainWindow();
-  }
+  // Dock click (macOS): create if gone, otherwise reveal — handles the case
+  // where the window exists but is hidden (started via --hidden / openAsHidden).
+  showMainWindowFromTray();
 });
 
 // Prevent multiple instances
@@ -1291,10 +1512,11 @@ const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+  app.on('second-instance', (event, argv) => {
+    // A normal relaunch should reveal the widget. Ignore a --hidden auto-start
+    // relaunch so it doesn't pop the window open. showMainWindowFromTray()
+    // reveals a hidden/minimized window (plain focus() can't unhide show:false).
+    if (Array.isArray(argv) && argv.includes('--hidden')) return;
+    showMainWindowFromTray();
   });
 }

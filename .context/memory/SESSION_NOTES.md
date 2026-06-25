@@ -1,3 +1,31 @@
+## 2026-05-29 | Tray Z-Order Fix + Reliability/Standard-Applet Pass
+
+**What:** Fixed the "widget shows behind the foreground app on tray click" bug, then implemented a council-reviewed reliability plan (`.context/docs/PLAN_widget-improvements.md`, CP1–CP8b across 3 review batches).
+
+**Z-order fix:**
+- Root cause was twofold: (1) `tray.on('click')` used `showInactive()` with no raise; (2) `save-settings` applied the RAW request payload, so any partial save (`saveSettings({expanded})` on expand/compact toggle) ran `setAlwaysOnTop(undefined)` and silently disabled always-on-top at runtime. That second one was the real cause of the intermittent symptom.
+- `showMainWindowFromTray()`: `showInactive()` → momentary `setAlwaysOnTop(true)`+`moveTop()` → revert to saved pref after 100ms (raises without taking focus, so auto-hide taskbar stays put). `save-settings` now applies effective stored values via `applyMainAlwaysOnTopPreference()`.
+
+**Reliability CPs:**
+- CP1 error taxonomy (`src/lib/errors.js`): auth+cloudflare→logout, network/unknown→keep cached; `net.isOnline()` gate; response-shape validation. Fixes false-logout on captured DNS/ISP error pages.
+- CP2 single-settlement guard in `fetch-via-window.js`.
+- CP3 `fetchManyViaWindow`: 3 hidden windows → 1 (in-page same-origin fetch). Experimental `session.fetch` behind `USE_SESSION_FETCH` (default off).
+- CP4 in-flight guard for `detect-session-key`. CP5 Win11 `{0,0}` tray-bounds → cursor/display fallback. CP6 silent auto-start (`--hidden`, `show:false`). CP7 `electron-updater` inert-by-default. CP8a/b extracted pure helpers to `src/lib/{errors,validate}.js` + `src/renderer/format.js` with `node:test` (24 tests, `npm test`).
+
+**Decisions:**
+- Did NOT commit — the working tree had ~25 pre-existing uncommitted modifications at session start; couldn't cleanly isolate per-CP hunks. Left everything as working-tree changes for owner review.
+- `format.js` lives in `src/renderer/` (not `src/lib/`) so `script-src 'self'` over `file://` can load it (council: cross-dir `../lib/` would be blocked and white-screen the renderer).
+- CP7 kept despite council's "Won't for prototype" rec (user scoped it) — made inert-by-default + added mac `zip` target; no CI/signing changes.
+
+**Gotchas:**
+- `setAlwaysOnTop`/`moveTop` change z-order WITHOUT focus — the right tool for a tray flyout that mustn't trigger auto-hide taskbar.
+- `Session.fetch` may use default-session cookies, not the partition's (electron#44456) → pin the full cookie jar; kept default-off.
+- `checkForUpdatesAndNotify()` returns a promise that REJECTS offline → needs `.catch()` or it can crash (Node unhandled-rejection).
+- macOS 13+ `openAsHidden` deprecated; silent login is Windows-only here.
+- NOT runtime-tested on Windows (dev box is WSL/Linux) — verified via tests + static review + council. Owner validates on Windows.
+
+---
+
 ## 2026-03-09 16:00 | Documentation Update
 
 **What:** Rewrote README.md with quickstart-first approach. Created FILE_INDEX.md and ARCHITECTURE.md.

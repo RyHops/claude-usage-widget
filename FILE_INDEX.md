@@ -13,6 +13,7 @@
 | File | Purpose |
 |------|---------|
 | `src/renderer/app.js` | All widget logic — auth, data fetching, UI updates, charts, settings |
+| `src/renderer/format.js` | Pure formatting/trend helpers (`formatTime`, `calculateTrend`, `computeVelocity`); UMD — loaded before `app.js`/`tray-popup.js`, also `require`d by tests. Lives here (not `src/lib/`) so `script-src 'self'` over `file://` can load it. |
 | `src/renderer/styles.css` | Full stylesheet — Catppuccin themes, layout, animations |
 
 ## Preloads (IPC Bridge)
@@ -26,7 +27,17 @@
 
 | File | Purpose |
 |------|---------|
-| `src/fetch-via-window.js` | Hidden BrowserWindow fetch — bypasses Cloudflare bot detection |
+| `src/fetch-via-window.js` | Hidden BrowserWindow fetch — `fetchViaWindow` (single URL) + `fetchManyViaWindow` (one window, many same-origin fetches); Cloudflare-bypass + single-settlement guard |
+| `src/lib/errors.js` | Fetch error taxonomy (`classifyFetchError`, `isDestructive`, `isValidUsageShape`, `looksLikeAuthErrorBody`) — pure, unit-tested |
+| `src/lib/validate.js` | Settings validators (`validateBool/Int/Enum`, `sanitizeCSS`) — pure, unit-tested |
+
+## Tests
+
+| File | Purpose |
+|------|---------|
+| `test/errors.test.js` | `node:test` suite for the error taxonomy |
+| `test/validate.test.js` | `node:test` suite for settings validators |
+| `test/format.test.js` | `node:test` suite for formatters + UMD-global smoke test (`npm test` runs all) |
 
 ## Assets & Scripts
 
